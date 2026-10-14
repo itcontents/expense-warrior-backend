@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+logs/
+*.log
+.env
+.env.*.local
+keys/*private*.pem
+var/
+dist/
