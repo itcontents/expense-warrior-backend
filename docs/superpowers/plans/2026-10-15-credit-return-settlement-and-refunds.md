@@ -4,7 +4,7 @@
 
 **Goal:** Complete return accounting for delivered credit invoices: issue an atomic credit note while A/R is open, and use the original PawaPay deposit refund flow after the A/R collection has settled.
 
-**Architecture:** ITC remains authoritative for return, receivable, inventory, and journal state. Expense Warrior owns PawaPay refund initiation and provider-status reconciliation. A return and a collection reservation must serialize on the same ITC receivable row. Only verified terminal provider evidence may trigger refund posting.
+**Architecture:** ITC owns return, receivable, inventory, refund, and journal state, including PawaPay refund submission through its existing asynchronous refund worker. Expense Warrior does not run a second refund orchestrator. A return and a collection reservation must serialize on the same ITC receivable row. Only verified terminal provider evidence may trigger refund posting.
 
 **Tech Stack:** Node.js CommonJS, Express, PostgreSQL, existing ITC return models, PawaPay v2 adapter, signed ITC finance APIs, `node:test`.
 
@@ -52,13 +52,13 @@
 
 ### Task 3: PawaPay refund orchestration for settled A/R collections
 
-**Files:** Expense Warrior refund-attempt migration/repository/service/routes and callback inbox; ITC signed refund-command/status and finalization routes/service; related cross-service tests.
+**Files:** `itcstore-backend/src/services/returnRefundWorkflowService.js`, `src/services/paymentRefundWorker.js`, `src/services/refundAccountingService.js`, `src/services/refundCompletionService.js`, source-tag migration 139, and focused ITC tests. Expense Warrior remains responsible for the original collection operation and its immutable provider-account snapshot; it does not initiate the later return refund.
 
-- [ ] Persist a stable refund command using the verified collection operation, original deposit ID, amount, return ID, and provider id.
-- [ ] Initiate the refund once through `providerRegistry.getForOperation(provider, 'refund')`; store `ACCEPTED`, rejection, or unknown without duplicate submission.
-- [ ] Verify authoritative PawaPay refund status and identity/amount/currency before asking ITC to finalize.
-- [ ] ITC atomically posts the refund against the collection and return accounting, updates the return/order state, and appends an immutable event; use idempotency and amount caps against the original collection.
-- [ ] Keep unknown provider outcomes pending for exact-id recovery; no new refund ID after ambiguity.
+- [x] Persist the stable ITC refund request and outbox command with the exact verified collection operation, original deposit ID, approved amount, return ID, and trusted provider account/version.
+- [x] Submit once through ITC's existing payment refund worker; preserve accepted/rejected/unknown outcomes and reuse the stable refund identity during recovery.
+- [x] Verify authoritative PawaPay refund evidence against the stored refund identity and source before completion.
+- [x] Atomically post the refund through ITC's return accounting workflow, update return/order state, and append immutable events; cap refund requests against the verified collection amount.
+- [x] Retain unknown outcomes for exact-identity reconciliation; do not create a replacement refund after ambiguity.
 - [ ] Run mock contract tests, DB integration/concurrency tests where supported, and full Expense Warrior and ITC suites. Do not call PawaPay or apply migrations.
 
 ### Task 4: Backoffice and customer return presentation
@@ -71,4 +71,4 @@
 
 ## Current status
 
-PawaPay signed `initiateRefund` and `getRefundStatus` adapter methods and provider capability checks are implemented and covered by mocked tests. Credit-return eligibility, return-vs-collection serialization, source-only migration 138, source-journal reconciliation, and a distinct credit-note approval path are implemented and covered by focused policy, schema, mocked-posting, source-journal, notification, guard, and model-transaction tests. Credit-note replay now checks FIFO restore allocations and matching stock transactions for each restock line. PostgreSQL transaction and concurrency coverage is still needed before this return approval change is ready to enable; no credit-note posting was run against a database and no migration or financial posting was performed. The broad commerce safety suite needs configured ITC test database identity. Settled-collection refund orchestration and UI states remain incomplete. PawaPay docs: [initiate refund](https://docs.pawapay.io/v2/api-reference/refunds/initiate-refund), [check refund status](https://docs.pawapay.io/v2/api-reference/refunds/check-refund-status).
+ITC source implements tagged A/R collection refunds through the existing return approval, PawaPay worker, status reconciliation, treasury posting, and accounting replay paths. It fails closed if the verified collection/source account cannot be proven, enforces reviewer/operator separation, caps total refunds to the collection, and keeps its feature gate off by default. Credit-return eligibility, return-vs-collection serialization, source-only migrations 138–139, source-journal reconciliation, and the distinct `CREDITED` path have focused tests. The focused cross-source tests passed on 2026-10-16 (17 tests), including ITC source validation, worker submission, release gating, and replay evidence. PostgreSQL transaction/concurrency coverage and an authorized sandbox refund are still required before enablement; neither was run. The ITC backoffice presentation of credit-note and refund-pending/unknown/completed states remains a separate UI task. PawaPay docs: [initiate refund](https://docs.pawapay.io/v2/api-reference/refunds/initiate-refund), [check refund status](https://docs.pawapay.io/v2/api-reference/refunds/check-refund-status).
