@@ -27,3 +27,9 @@ The fresh catalog result confirms that the expected schema objects exist in `loc
 ## Operational boundary
 
 No migrations, database writes, payment-provider calls, or financial postings were performed for this check. Keep finance operations gated until a least-privilege audit reader can verify the two migration ledger entries and checksums in both targets, then complete the existing account/provider and transaction-readiness review. The inactive/non-postable 1100 account is a separate prerequisite for the approved A/R feature; migrations 134–135 do not establish that A/R workflow.
+
+## Read-only recheck
+
+During the 15 October continuation, the same least-privilege helper was rerun from the primary `itcstore-backend` checkout because the isolated integration worktree does not contain the audit-reader connection variables. The helper asserted the `shopit_accounting_audit` identity and ran each query in a read-only transaction. The recheck again returned no rows for migration 134 or 135 in `local_staging`; the `itc` query again failed with `permission denied for schema public`. No credentials were printed and no write-capable database identity was used.
+
+The `local_staging` chart-of-accounts check was refreshed: account 1020 (`PawaPay Clearing – ZMW`) is an active, postable asset; account 1100 (`Trade Receivables`) is an inactive, non-postable asset; and account 2020 (`Customer Credit Payable`) is an active, postable liability. This leaves A/R collection explicitly blocked by the 1100 account state. The 1020 and 2020 states do not prove that the migration ledger entries exist or authorize collection posting.
