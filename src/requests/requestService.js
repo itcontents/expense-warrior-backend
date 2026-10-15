@@ -95,7 +95,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
         if (result.replayed && attachment) await attachmentStorage.remove(attachment.storageKey)
         return result
       } catch (error) {
-        if (attachment) await attachmentStorage.remove(attachment.storageKey).catch(() => {})
+        if (attachment && error?.outcomeUnknown !== true) await attachmentStorage.remove(attachment.storageKey).catch(() => {})
         throw error
       }
     },

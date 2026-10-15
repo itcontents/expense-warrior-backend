@@ -31,6 +31,7 @@ function fingerprint(request, attachment = null) {
 async function submit({ pool, actor, request, attachment = null, idempotencyKey, requestId = null }) {
   const client = await pool.connect()
   const requestHash = fingerprint(request, attachment)
+  let submissionCommitAttempted = false
   try {
     await client.query('BEGIN')
 
@@ -184,10 +185,16 @@ async function submit({ pool, actor, request, attachment = null, idempotencyKey,
        WHERE actor_customer_id = $1 AND operation = $2 AND idempotency_key = $3
     `, [actor.customerId, OPERATION_SUBMIT, idempotencyKey, created.request_id, JSON.stringify(response)])
 
+    submissionCommitAttempted = true
     await client.query('COMMIT')
     return { request: response, replayed: false }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})
+    if (submissionCommitAttempted) {
+      const outcomeUnknown = new RequestRepositoryError('REQUEST_SUBMISSION_OUTCOME_UNKNOWN', 503)
+      outcomeUnknown.outcomeUnknown = true
+      throw outcomeUnknown
+    }
     throw error
   } finally {
     client.release()

@@ -73,6 +73,30 @@ test('submitRequest_rejectsIdempotencyKeyReusedWithDifferentPayload', async () =
   await assert.rejects(repository.submit({ actor, request, idempotencyKey: key }), (error) => error.code === 'IDEMPOTENCY_KEY_REUSED')
 })
 
+test('submitRequest_marksACreationCommitFailureAsAnUnknownOutcome', async () => {
+  const { calls, pool } = fakePool((sql) => {
+    if (sql.includes('INSERT INTO idempotency_records')) return { rowCount: 1, rows: [{ idempotency_key: key }] }
+    if (sql.includes('FROM expense_categories')) return { rowCount: 1, rows: [{ category_id: request.categoryId, parent_category_id: null, reason_required: false, attachment_required: false }] }
+    if (sql.includes('INSERT INTO expense_requests')) return { rowCount: 1, rows: [{
+      request_id: '6a168a4e-65ca-4887-9a9c-6137a8002aba', requester_customer_id: actor.customerId,
+      category_id: request.categoryId, subcategory_id: null, reviewer_manager_customer_id: null,
+      amount: request.amount, currency: request.currency, reason: request.reason, status: 'PENDING_ADMIN',
+    }] }
+    if (sql === 'COMMIT') throw Object.assign(new Error('connection lost while committing'), { code: '08006' })
+    return { rowCount: 1, rows: [] }
+  })
+  const repository = createRequestRepository({ pool })
+
+  await assert.rejects(repository.submit({
+    actor: { ...actor, role: 'admin' }, request, idempotencyKey: key,
+    attachment: { storageKey: '123e4567-e89b-42d3-a456-426614174000.png', mediaType: 'image/png', size: 9, sha256: 'a'.repeat(64) },
+  }), (error) => error.code === 'REQUEST_SUBMISSION_OUTCOME_UNKNOWN' && error.outcomeUnknown === true)
+
+  assert.ok(calls.some((call) => call.sql === 'COMMIT'))
+  assert.ok(calls.some((call) => call.sql === 'ROLLBACK'))
+  assert.ok(calls.some((call) => call.sql === 'RELEASE'))
+})
+
 test('submitRequest_snapshotsAssignedManagerAndRoutesToManagerFirst', async () => {
   const managerId = '8c1e1275-0a6d-4e0e-9176-3f6d46ab9986'
   const assignmentId = '478d27bf-d574-488d-a347-7f5a87e3b11c'

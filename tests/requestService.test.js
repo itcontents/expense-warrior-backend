@@ -46,6 +46,26 @@ test('submitRequest_removesRetryUploadWhenRepositoryReturnsPreviousIdempotentReq
   assert.deepEqual(removed, ['123e4567-e89b-42d3-a456-426614174000.png'])
 })
 
+test('submitRequest_preservesEvidenceWhenTheDatabaseCommitOutcomeIsUnknown', async () => {
+  const removed = []
+  const attachmentStorage = {
+    save: async () => ({ storageKey: '123e4567-e89b-42d3-a456-426614174000.png', mediaType: 'image/png', size: 9, sha256: 'a'.repeat(64) }),
+    remove: async (key) => { removed.push(key) },
+  }
+  const outcomeUnknown = Object.assign(new Error('REQUEST_SUBMISSION_OUTCOME_UNKNOWN'), {
+    code: 'REQUEST_SUBMISSION_OUTCOME_UNKNOWN',
+    outcomeUnknown: true,
+  })
+  const repository = repositoryWith({ submit: async () => { throw outcomeUnknown } })
+  const service = createRequestService({ repository, attachmentStorage })
+
+  await assert.rejects(service.submitRequest(actor, {
+    category_id: '45a79d36-1c70-4622-84d2-145a26f288d3', amount: '25.00',
+  }, idempotencyKey, { file: { buffer: Buffer.from('image'), mimetype: 'image/png' } }), (error) => error === outcomeUnknown)
+
+  assert.deepEqual(removed, [])
+})
+
 test('listRequests_scopesStaffAndManagerThroughRepositoryActorContext', async () => {
   let input
   const service = createRequestService({ repository: repositoryWith({ listForActor: async (value) => { input = value; return [] } }) })
