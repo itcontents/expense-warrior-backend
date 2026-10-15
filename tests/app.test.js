@@ -41,6 +41,30 @@ test('ready_returns200WhenDatabaseProbeSucceeds', async () => {
   })
 })
 
+test('publicPaymentRoutesReportCollectionsDisabledWithoutStartingAttempts', async () => {
+  const pool = {
+    query: async () => ({ rows: [] }),
+    connect: async () => { throw new Error('public disabled responses must not access the database') },
+  }
+  await withServer(createApp({ pool }), async (baseUrl) => {
+    const link = await fetch(`${baseUrl}/api/v1/expense-warrior/public/payment-links/public-token`)
+    assert.equal(link.status, 503)
+    assert.deepEqual(await link.json(), {
+      error: { code: 'COLLECTIONS_DISABLED', message: 'Payments are temporarily unavailable' },
+    })
+
+    const attempt = await fetch(`${baseUrl}/api/v1/expense-warrior/public/payment-links/public-token/attempts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': '00000000-0000-4000-8000-000000000001' },
+      body: JSON.stringify({ network_code: 'MTN_MOMO_ZMB', phone_number: '260957909783' }),
+    })
+    assert.equal(attempt.status, 503)
+    assert.deepEqual(await attempt.json(), {
+      error: { code: 'COLLECTIONS_DISABLED', message: 'Payments are temporarily unavailable' },
+    })
+  })
+})
+
 test('appMountsTheAdminOnlyPawaPayWalletBalanceRouteWhenProviderRegistryIsConfigured', async () => {
   let requestedCountry
   const app = createApp({

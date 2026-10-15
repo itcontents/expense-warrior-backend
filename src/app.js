@@ -46,6 +46,18 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
 
   app.use(express.json({ limit: '1mb', strict: true }))
 
+  if (collectionPaymentsEnabled === true && (!paymentProviders || typeof pool.connect !== 'function')) {
+    throw new TypeError('Payment-link collections require a database and signed provider registry')
+  }
+
+  if (collectionPaymentsEnabled !== true) {
+    const disabledPublicPaymentRouter = express.Router()
+    disabledPublicPaymentRouter.use((_req, res) => res.status(503).json({
+      error: { code: 'COLLECTIONS_DISABLED', message: 'Payments are temporarily unavailable' },
+    }))
+    app.use('/api/v1/expense-warrior/public/payment-links', disabledPublicPaymentRouter)
+  }
+
   let paymentLinkService = null
   if (typeof pool.connect === 'function') {
     const { createPaymentLinkRepository } = require('./paymentLinks/paymentLinkRepository')
