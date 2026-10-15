@@ -1,6 +1,6 @@
 # ITC refunds for Expense Warrior A/R collections
 
-**Status:** approved direction; source implementation is gated and not database-verified
+**Status:** owner-approved first-class collection source (2026-10-16); source implementation is gated and not database-verified
 
 ## Goal
 
@@ -62,7 +62,7 @@ The ITC provider integration must use the same PawaPay merchant account that acc
 - Keep A/R collection disabled while account 1100 is inactive or non-postable.
 - Before enabling, run disposable-PostgreSQL transaction, concurrency, and replay checks plus an authorized sandbox refund test. Do not create a live transaction during development.
 
-## Implementation status (2026-10-15)
+## Implementation status (2026-10-16)
 
 - ITC source code now has a tagged A/R collection refund path through return approval, provider submission/reconciliation, treasury posting, and accounting replay validation.
 - `EXPENSE_WARRIOR_COLLECTION_REFUNDS_ENABLED` defaults to `false`; `.env.example` keeps it off.
