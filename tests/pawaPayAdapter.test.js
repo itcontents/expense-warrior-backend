@@ -217,6 +217,53 @@ test('deposit options accept the operationTypes object and amount fields returne
   ])
 })
 
+test('active deposit capabilities are cached for 30 seconds, copied on return, and coalesce concurrent reads', async () => {
+  let timestamp = now
+  let calls = 0
+  const configuration = { countries: [{ country: 'ZMB', providers: [
+    { provider: 'MTN_MOMO_ZMB', currencies: [{ currency: 'ZMW', operationTypes: { DEPOSIT: {
+      status: 'OPERATIONAL', minAmount: '1', maxAmount: '20000', decimalsInAmount: 'TWO_PLACES',
+      authType: 'PROVIDER_AUTH', pinPrompt: 'AUTOMATIC',
+    } } }] },
+  ] }] }
+  const client = new PawaPayClient(config, {
+    now: () => timestamp,
+    fetchImpl: async () => {
+      calls += 1
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), text: async () => JSON.stringify(configuration) }
+    },
+  })
+
+  const [left, right] = await Promise.all([client.getDepositNetworkOptions(), client.getDepositNetworkOptions()])
+  assert.equal(calls, 1)
+  assert.deepEqual(left, right)
+  left[0].label = 'mutated caller copy'
+  assert.equal((await client.getDepositNetworkOptions())[0].label, 'MTN MoMo')
+  assert.equal(calls, 1)
+
+  timestamp += 29999
+  await client.getDepositNetworkOptions()
+  assert.equal(calls, 1)
+  timestamp += 1
+  await client.getDepositNetworkOptions()
+  assert.equal(calls, 2)
+})
+
+test('failed active configuration reads are not cached', async () => {
+  let calls = 0
+  const client = new PawaPayClient(config, {
+    fetchImpl: async () => {
+      calls += 1
+      if (calls === 1) return { ok: false, status: 503, headers: new Headers(), text: async () => '' }
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), text: async () => JSON.stringify({ countries: [] }) }
+    },
+  })
+
+  await assert.rejects(client.getDepositNetworkOptions(), { code: 'PAWAPAY_REQUEST_FAILED' })
+  assert.deepEqual(await client.getDepositNetworkOptions(), [])
+  assert.equal(calls, 2)
+})
+
 test('active configuration must be structurally valid before exposing deposit options', async () => {
   const client = new PawaPayClient(config, {
     now: () => now,

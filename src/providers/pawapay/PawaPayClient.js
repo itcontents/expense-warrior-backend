@@ -8,6 +8,8 @@ const BASE_URLS = new Set([
 ])
 const TRANSACTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const CALLBACK_COMPONENTS = Object.freeze(['@method', '@authority', '@path', 'signature-date', 'content-digest', 'content-type'])
+const ACTIVE_DEPOSIT_CONFIG_TTL_MS = 30_000
+const MAX_ACTIVE_DEPOSIT_CONFIG_ENTRIES = 64
 const NETWORKS = Object.freeze([
   Object.freeze({ code: 'AIRTEL_OAPI_ZMB', label: 'Airtel Money' }),
   Object.freeze({ code: 'MTN_MOMO_ZMB', label: 'MTN MoMo' }),
@@ -185,6 +187,8 @@ class PawaPayClient {
     Object.defineProperty(this, 'privateKey', { value: null, writable: true, enumerable: false })
     this.callbackPublicKeys = null
     this.callbackPublicKeysFetchedAt = 0
+    this.activeDepositConfigCache = new Map()
+    this.activeDepositConfigInFlight = new Map()
   }
 
   loadPrivateKey() {
@@ -334,8 +338,42 @@ class PawaPayClient {
     if (!/^[A-Z]{3}$/.test(country) || !/^[A-Z]{3}$/.test(currency)) {
       throw new PawaPayError('PAWAPAY_INPUT_INVALID', { statusCode: 400 })
     }
-    const configuration = await this.getActiveConfiguration({ country, operationType: 'DEPOSIT' })
-    return depositOptionsFromConfiguration(configuration, { country, currency })
+    const cacheKey = `${country}:${currency}`
+    const timestamp = this.now()
+    const cached = this.activeDepositConfigCache.get(cacheKey)
+    if (cached && cached.expiresAt > timestamp) {
+      this.activeDepositConfigCache.delete(cacheKey)
+      this.activeDepositConfigCache.set(cacheKey, cached)
+      return cached.networks.map((network) => ({ ...network }))
+    }
+    this.activeDepositConfigCache.delete(cacheKey)
+
+    let pending = this.activeDepositConfigInFlight.get(cacheKey)
+    if (!pending) {
+      pending = (async () => {
+        const configuration = await this.getActiveConfiguration({ country, operationType: 'DEPOSIT' })
+        const networks = depositOptionsFromConfiguration(configuration, { country, currency })
+        if (this.activeDepositConfigCache.size >= MAX_ACTIVE_DEPOSIT_CONFIG_ENTRIES) {
+          const oldestKey = this.activeDepositConfigCache.keys().next().value
+          if (oldestKey) this.activeDepositConfigCache.delete(oldestKey)
+        }
+        this.activeDepositConfigCache.set(cacheKey, {
+          networks,
+          expiresAt: this.now() + ACTIVE_DEPOSIT_CONFIG_TTL_MS,
+        })
+        return networks
+      })()
+      this.activeDepositConfigInFlight.set(cacheKey, pending)
+    }
+
+    try {
+      const networks = await pending
+      return networks.map((network) => ({ ...network }))
+    } finally {
+      if (this.activeDepositConfigInFlight.get(cacheKey) === pending) {
+        this.activeDepositConfigInFlight.delete(cacheKey)
+      }
+    }
   }
 
   predictProvider(phoneNumber) {
