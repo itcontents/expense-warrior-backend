@@ -1,5 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const { createProviderRegistry, ProviderRegistryError } = require('../src/providers/providerRegistry')
 
 const airtelNetwork = { code: 'AIRTEL_OAPI_ZMB', label: 'Airtel Money' }
@@ -36,6 +37,31 @@ test('PawaPay exposes its configured Zambian deposit and payout networks separat
     'AIRTEL_OAPI_ZMB', 'MTN_MOMO_ZMB', 'ZAMTEL_ZMB',
   ])
   assert.deepEqual(registry.getNetworks('pawapay', 'balance'), [])
+})
+
+test('active payment options are resolved through the provider adapter', async () => {
+  let requestedUrl
+  const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const signaturePrivateKey = pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  const registry = createProviderRegistry({
+    pawaPayConfig: { apiToken: 'sandbox-test-token', baseUrl: 'https://api.sandbox.pawapay.io', signatureEnabled: true, signatureKeyId: 'test', signaturePrivateKey },
+    dependencies: { pawapay: { fetchImpl: async (url) => {
+      requestedUrl = String(url)
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), text: async () => JSON.stringify({
+        countries: [{ country: 'ZMB', providers: [{ provider: 'AIRTEL_OAPI_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ DEPOSIT: {
+          status: 'OPERATIONAL', minTransactionLimit: '1', maxTransactionLimit: '1000', decimalsInAmount: 'TWO_PLACES', authType: 'PROVIDER_AUTH',
+        } }] }] }] }],
+      }) }
+    } } },
+  })
+
+  const networks = await registry.getActiveNetworks('deposit', { country: 'ZMB', currency: 'ZMW' })
+
+  assert.equal(requestedUrl, 'https://api.sandbox.pawapay.io/v2/active-conf?country=ZMB&operationType=DEPOSIT')
+  assert.deepEqual(networks, [{
+    provider_code: 'pawapay', code: 'AIRTEL_OAPI_ZMB', label: 'Airtel Money', min_amount: '1', max_amount: '1000',
+    decimals_in_amount: 'TWO_PLACES', auth_type: 'PROVIDER_AUTH',
+  }])
 })
 
 test('provider registry rejects malformed operation capability metadata', () => {

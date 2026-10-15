@@ -13,6 +13,21 @@ function createPaymentLinkRepository({ pool } = {}) {
       `, [tokenHash])
       return result.rows[0] || null
     },
+    async getAttemptByIdempotency(tokenHash, idempotencyKey) {
+      const result = await pool.query(`
+        SELECT a.attempt_id, a.payment_link_id, a.request_fingerprint, a.provider_code,
+               a.provider_transaction_id, a.network_code, a.payer_phone, a.amount::text, a.currency,
+               a.state, a.provider_status, a.provider_reference, a.created_at, a.updated_at,
+               a.verified_at, a.ledger_operation_id, a.provider_evidence_digest,
+               l.public_token_hash, l.description, l.collection_target_type, l.revenue_account_code,
+               l.customer_id, l.receivable_id, l.created_by_customer_id
+          FROM payment_link_attempts a
+          JOIN payment_links l ON l.payment_link_id = a.payment_link_id
+         WHERE l.public_token_hash = $1 AND a.idempotency_key = $2
+         LIMIT 1
+      `, [tokenHash, idempotencyKey])
+      return result.rows[0] || null
+    },
     async createAttempt(input) {
       const client = await pool.connect()
       try {

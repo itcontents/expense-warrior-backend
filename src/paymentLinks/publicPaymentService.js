@@ -53,13 +53,39 @@ function readProviderTransaction(payload) {
   return payload
 }
 
-function getDepositNetworks(providerRegistry) {
-  if (typeof providerRegistry?.getNetworks !== 'function') return []
-  return providerRegistry.getNetworks(undefined, 'deposit')
+function amountToMinor(value) {
+  const match = String(value || '').match(/^(0|[1-9]\d{0,11})(?:\.(\d{1,2}))?$/)
+  if (!match) return null
+  return BigInt(match[1]) * 100n + BigInt(String(match[2] || '').padEnd(2, '0') || '0')
 }
 
-function getUniqueNetwork(providerRegistry, networkCode) {
-  const matching = getDepositNetworks(providerRegistry).filter(({ code }) => code === networkCode)
+function providerAmount(amount, network) {
+  const valueMinor = amountToMinor(amount)
+  const minimum = amountToMinor(network.min_amount)
+  const maximum = amountToMinor(network.max_amount)
+  if (valueMinor === null || minimum === null || maximum === null || valueMinor < minimum || valueMinor > maximum) return null
+  if (network.decimals_in_amount === 'NONE') {
+    if (valueMinor % 100n !== 0n) return null
+    return String(valueMinor / 100n)
+  }
+  if (network.decimals_in_amount === 'TWO_PLACES') return String(amount)
+  return null
+}
+
+async function getDepositNetworks(providerRegistry) {
+  if (typeof providerRegistry?.getActiveNetworks !== 'function') return []
+  const networks = await providerRegistry.getActiveNetworks('deposit', { country: 'ZMB', currency: 'ZMW' })
+  if (!Array.isArray(networks)) throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE', 503)
+  return networks
+}
+
+async function getUniqueNetwork(providerRegistry, networkCode, link) {
+  if (link.currency !== 'ZMW') return null
+  let availableNetworks
+  try { availableNetworks = await getDepositNetworks(providerRegistry) }
+  catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE', 503) }
+  const matching = availableNetworks
+    .filter((network) => network.code === networkCode && providerAmount(link.amount, network) !== null)
   if (matching.length > 1) throw new PaymentLinkError('PAYMENT_NETWORK_ROUTE_AMBIGUOUS', 503)
   return matching[0] || null
 }
@@ -78,7 +104,9 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{40,128}$/.test(token)) throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
       const link = await repository.getPublicLink(sha256(token))
       if (!link) throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
-      const availableNetworks = getDepositNetworks(providerRegistry)
+      let availableNetworks
+      try { availableNetworks = await getDepositNetworks(providerRegistry) }
+      catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE', 503) }
       const networkCounts = new Map()
       for (const { code } of availableNetworks) networkCounts.set(code, (networkCounts.get(code) || 0) + 1)
       return {
@@ -87,8 +115,11 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         amount: link.amount,
         currency: link.currency,
         available_networks: availableNetworks
-          .filter(({ code }) => networkCounts.get(code) === 1)
-          .map(({ code, label }) => ({ code, label })),
+          .filter((network) => link.currency === 'ZMW' && networkCounts.get(network.code) === 1 && providerAmount(link.amount, network) !== null)
+          .map(({ code, label, min_amount, max_amount, decimals_in_amount, auth_type, pin_prompt }) => ({
+            code, label, min_amount, max_amount, decimals_in_amount, auth_type,
+            ...(pin_prompt ? { pin_prompt } : {}),
+          })),
       }
     },
 
@@ -96,10 +127,22 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{40,128}$/.test(token) ||
           !input || typeof input !== 'object' || !PHONE_ZM.test(String(input.phone_number || '')) ||
           !UUID.test(String(idempotencyKey || ''))) throw new PaymentLinkError('INVALID_PAYMENT_ATTEMPT', 400)
-      const selectedNetwork = getUniqueNetwork(providerRegistry, input.network_code)
-      if (!selectedNetwork) throw new PaymentLinkError('INVALID_PAYMENT_ATTEMPT', 400)
       const tokenHash = sha256(token)
       const requestFingerprint = sha256(JSON.stringify([input.network_code, input.phone_number]))
+      if (typeof repository.getAttemptByIdempotency === 'function') {
+        const existing = await repository.getAttemptByIdempotency(tokenHash, idempotencyKey)
+        if (existing) {
+          if (existing.request_fingerprint !== requestFingerprint) throw new PaymentLinkError('IDEMPOTENCY_CONFLICT', 409)
+          const shouldResumeArReservation = isReceivableLink(existing) &&
+            ['SUBMITTING', 'UNKNOWN'].includes(existing.state) &&
+            ['ITC_RESERVATION_UNKNOWN', 'ITC_RESERVATION_PENDING'].includes(existing.provider_status)
+          if (!shouldResumeArReservation) return { attempt: toPublicAttempt(existing), replayed: true }
+        }
+      }
+      const link = await repository.getPublicLink(tokenHash)
+      if (!link) throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
+      const selectedNetwork = await getUniqueNetwork(providerRegistry, input.network_code, link)
+      if (!selectedNetwork) throw new PaymentLinkError('INVALID_PAYMENT_ATTEMPT', 400)
       const attemptId = idFactory()
       if (!UUID.test(String(attemptId || ''))) throw new PaymentLinkError('PAYMENT_ATTEMPT_ID_INVALID')
       const providerCode = selectedNetwork.provider_code
@@ -141,7 +184,7 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       try {
         const response = await provider.initiateDeposit({
           depositId: prepared.attempt.provider_transaction_id,
-          amount: prepared.attempt.amount,
+          amount: providerAmount(prepared.attempt.amount, selectedNetwork),
           phoneNumber: prepared.attempt.payer_phone,
           provider: prepared.attempt.network_code,
           clientReferenceId: `EW-${prepared.attempt.attempt_id}`,
@@ -253,7 +296,8 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       const receivedAmount = providerTransaction.depositedAmount || providerTransaction.amount
       const evidenceMatches = providerTransaction.country === 'ZMB' &&
         transactionId === attempt.provider_transaction_id &&
-        requestedAmount === attempt.amount && receivedAmount === attempt.amount &&
+        amountToMinor(requestedAmount) === amountToMinor(attempt.amount) &&
+        amountToMinor(receivedAmount) === amountToMinor(attempt.amount) &&
         providerTransaction.currency === attempt.currency && network === attempt.network_code && payerPhone === attempt.payer_phone
       if (!evidenceMatches) {
         if (attempt.state === 'VERIFIED_PENDING_LEDGER') return toPublicAttempt(attempt)

@@ -14,7 +14,7 @@ const NETWORKS = Object.freeze([
   Object.freeze({ code: 'ZAMTEL_ZMB', label: 'Zamtel Kwacha' }),
 ])
 const PROVIDERS = new Set(NETWORKS.map(({ code }) => code))
-const AMOUNT = /^(?:0|[1-9]\d{0,11})\.\d{2}$/
+const AMOUNT = /^(?:0|[1-9]\d{0,11})(?:\.\d{2})?$/
 
 class PawaPayError extends Error {
   constructor(code, { statusCode = 502, outcomeUnknown = false, providerStatus = null } = {}) {
@@ -104,6 +104,44 @@ function assertAmount(value) {
     throw new PawaPayError('PAWAPAY_INPUT_INVALID', { statusCode: 400 })
   }
   return amount
+}
+
+function depositOptionsFromConfiguration(configuration, { country = 'ZMB', currency = 'ZMW' } = {}) {
+  if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration) ||
+      !Array.isArray(configuration.countries)) {
+    throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
+  }
+  const countryConfig = configuration.countries.find((item) => item?.country === country)
+  if (!countryConfig) return []
+  if (!Array.isArray(countryConfig.providers)) throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
+  const result = []
+  for (const providerConfig of countryConfig.providers) {
+    const network = NETWORKS.find(({ code }) => code === providerConfig?.provider)
+    if (!network) continue
+    if (!Array.isArray(providerConfig.currencies)) throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
+    const currencyConfig = providerConfig.currencies.find((item) => item?.currency === currency)
+    if (!currencyConfig) continue
+    if (!Array.isArray(currencyConfig.operationTypes)) throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
+    const operation = currencyConfig.operationTypes
+      .map((item) => item?.DEPOSIT || (item?.operationType === 'DEPOSIT' ? item : null))
+      .find(Boolean)
+    if (!operation || operation.status !== 'OPERATIONAL') continue
+    const validAmount = (value) => typeof value === 'string' && /^(?:0|[1-9]\d{0,11})(?:\.\d{1,2})?$/.test(value)
+    if (!validAmount(operation.minTransactionLimit) || !validAmount(operation.maxTransactionLimit) ||
+        !['NONE', 'TWO_PLACES'].includes(operation.decimalsInAmount) ||
+        typeof operation.authType !== 'string' || !operation.authType.trim()) {
+      throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
+    }
+    result.push({
+      ...network,
+      min_amount: operation.minTransactionLimit,
+      max_amount: operation.maxTransactionLimit,
+      decimals_in_amount: operation.decimalsInAmount,
+      auth_type: operation.authType,
+      ...(typeof operation.pinPrompt === 'string' ? { pin_prompt: operation.pinPrompt } : {}),
+    })
+  }
+  return result
 }
 
 function assertPhoneAndProvider(phoneNumber, provider) {
@@ -278,6 +316,14 @@ class PawaPayClient {
     }
     const query = new URLSearchParams({ country, operationType })
     return this.request(`/v2/active-conf?${query}`)
+  }
+
+  async getDepositNetworkOptions({ country = 'ZMB', currency = 'ZMW' } = {}) {
+    if (!/^[A-Z]{3}$/.test(country) || !/^[A-Z]{3}$/.test(currency)) {
+      throw new PawaPayError('PAWAPAY_INPUT_INVALID', { statusCode: 400 })
+    }
+    const configuration = await this.getActiveConfiguration({ country, operationType: 'DEPOSIT' })
+    return depositOptionsFromConfiguration(configuration, { country, currency })
   }
 
   predictProvider(phoneNumber) {

@@ -169,6 +169,41 @@ test('wallet balance lookup uses the documented country filter and returns provi
   assert.deepEqual(result.balances, [{ country: 'ZMB', currency: 'ZMW', balance: '120.00', provider: '' }])
 })
 
+test('deposit options come only from operational Zambia ZMW entries in active configuration', async () => {
+  let call
+  const client = new PawaPayClient(config, {
+    now: () => now,
+    fetchImpl: async (url, options) => {
+      call = { url: String(url), ...options }
+      return { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), text: async () => JSON.stringify({
+        companyName: 'Merchant',
+        countries: [{ country: 'ZMB', providers: [
+          { provider: 'MTN_MOMO_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ DEPOSIT: { status: 'OPERATIONAL', minTransactionLimit: '5', maxTransactionLimit: '2500', decimalsInAmount: 'TWO_PLACES', authType: 'PROVIDER_AUTH', pinPrompt: 'AUTOMATIC' } }] }] },
+          { provider: 'AIRTEL_OAPI_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ operationType: 'DEPOSIT', status: 'CLOSED', minTransactionLimit: '1', maxTransactionLimit: '1000', decimalsInAmount: 'TWO_PLACES', authType: 'PROVIDER_AUTH' }] }] },
+          { provider: 'ZAMTEL_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ operationType: 'DEPOSIT', status: 'DELAYED', minTransactionLimit: '1', maxTransactionLimit: '1000', decimalsInAmount: 'NONE', authType: 'PROVIDER_AUTH' }] }] },
+          { provider: 'UNSUPPORTED_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ operationType: 'DEPOSIT', status: 'OPERATIONAL' }] }] },
+        ] }, { country: 'MWI', providers: [] }],
+      }) }
+    },
+  })
+
+  const options = await client.getDepositNetworkOptions()
+
+  assert.equal(call.url, 'https://api.sandbox.pawapay.io/v2/active-conf?country=ZMB&operationType=DEPOSIT')
+  assert.deepEqual(options, [{
+    code: 'MTN_MOMO_ZMB', label: 'MTN MoMo', min_amount: '5', max_amount: '2500',
+    decimals_in_amount: 'TWO_PLACES', auth_type: 'PROVIDER_AUTH', pin_prompt: 'AUTOMATIC',
+  }])
+})
+
+test('active configuration must be structurally valid before exposing deposit options', async () => {
+  const client = new PawaPayClient(config, {
+    now: () => now,
+    fetchImpl: async () => ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), text: async () => '{"countries":{}}' }),
+  })
+  await assert.rejects(client.getDepositNetworkOptions(), { code: 'PAWAPAY_RESPONSE_INVALID' })
+})
+
 test('invalid transaction identifiers and amounts are rejected before network access', async () => {
   let calls = 0
   const client = new PawaPayClient({ ...config, signaturePrivateKey: privateKey }, { fetchImpl: async () => { calls += 1 } })

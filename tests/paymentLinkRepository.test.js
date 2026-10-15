@@ -109,3 +109,19 @@ test('payment-link repository rejects changed content for a reused key without c
   assert.equal(pool.state.links.size, 1)
   assert.equal(pool.state.auditEvents, 1)
 })
+
+test('payment-link repository finds an existing attempt by opaque link hash and idempotency key', async () => {
+  const expected = {
+    attempt_id: '11111111-1111-4111-8111-111111111111',
+    request_fingerprint: 'b'.repeat(64), state: 'PENDING', amount: '75.50', currency: 'ZMW',
+  }
+  let query
+  const repository = createPaymentLinkRepository({ pool: {
+    connect: async () => { throw new Error('unused') },
+    query: async (sql, params) => { query = { sql, params }; return { rows: [expected] } },
+  } })
+  const result = await repository.getAttemptByIdempotency('a'.repeat(64), input.idempotencyKey)
+  assert.deepEqual(result, expected)
+  assert.deepEqual(query.params, ['a'.repeat(64), input.idempotencyKey])
+  assert.match(query.sql, /l\.public_token_hash = \$1 AND a\.idempotency_key = \$2/)
+})

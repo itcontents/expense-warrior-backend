@@ -17,6 +17,9 @@ function createProviderRegistry({ pawaPayConfig, dependencies = {}, additionalPr
       return pawapayClient
     },
     getNetworks: (operation) => PawaPayClient.getNetworks(operation),
+    getActiveNetworks: (operation, options) => operation === 'deposit'
+      ? definitions.get('pawapay').create().getDepositNetworkOptions(options)
+      : Promise.resolve([]),
   }]])
 
   if (!additionalProviders || typeof additionalProviders !== 'object' || Array.isArray(additionalProviders)) {
@@ -81,6 +84,22 @@ function createProviderRegistry({ pawaPayConfig, dependencies = {}, additionalPr
           return { provider_code: registeredCode, ...network }
         })
       })
+    },
+    async getActiveNetworks(operation = 'deposit', options = {}) {
+      const providers = [...definitions.entries()]
+      const networkLists = await Promise.all(providers.map(async ([registeredCode, definition]) => {
+        if (typeof definition.getActiveNetworks !== 'function') return []
+        let networks
+        try { networks = await definition.getActiveNetworks(operation, options) }
+        catch (_error) { throw new ProviderRegistryError('PAYMENT_PROVIDER_CONFIGURATION_UNAVAILABLE', 503) }
+        if (!Array.isArray(networks) || networks.some((network) =>
+          !network || typeof network !== 'object' || typeof network.code !== 'string' || !network.code.trim() ||
+          typeof network.label !== 'string' || !network.label.trim())) {
+          throw new ProviderRegistryError('PAYMENT_PROVIDER_CONFIGURATION_INVALID', 503)
+        }
+        return networks.map((network) => ({ provider_code: registeredCode, ...network }))
+      }))
+      return networkLists.flat()
     },
   })
 }

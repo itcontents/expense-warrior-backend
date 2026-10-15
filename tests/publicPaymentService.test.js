@@ -1,11 +1,13 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const { createPublicPaymentService } = require('../src/paymentLinks/publicPaymentService')
 
 const token = 'T'.repeat(43)
 const attemptId = '10000000-0000-4000-8000-000000000001'
 const idempotencyKey = '20000000-0000-4000-8000-000000000001'
 const mtnNetwork = { provider_code: 'pawapay', code: 'MTN_MOMO_ZMB', label: 'MTN MoMo' }
+const mtnDepositOption = { ...mtnNetwork, min_amount: '1', max_amount: '5000', decimals_in_amount: 'TWO_PLACES', auth_type: 'PROVIDER_AUTH', pin_prompt: 'AUTOMATIC' }
 const baseAttempt = {
   attempt_id: attemptId,
   provider_transaction_id: attemptId,
@@ -18,17 +20,19 @@ const baseAttempt = {
   created_at: '2026-10-15T12:00:00.000Z',
   updated_at: '2026-10-15T12:00:00.000Z',
 }
+const baseLink = { payment_link_id: '40000000-0000-4000-8000-000000000001', amount: '125.00', currency: 'ZMW', description: 'Test' }
 
 test('startAttempt persists a stable attempt, sends one signed-provider operation and masks the phone', async () => {
   const calls = []
   const repository = {
+    getPublicLink: async () => baseLink,
     createAttempt: async (input) => ({ link: { amount: '125.00', currency: 'ZMW' }, attempt: { ...baseAttempt, ...input }, replayed: false }),
     updateAttempt: async (_id, update) => ({ ...baseAttempt, ...update }),
   }
   const service = createPublicPaymentService({
     repository,
     idFactory: () => attemptId,
-    providerRegistry: { getNetworks: () => [mtnNetwork], get: () => ({
+    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], get: () => ({
       initiateDeposit: async (input) => { calls.push(input); return { depositId: attemptId, status: 'ACCEPTED' } },
       getDepositStatus: async () => null,
     }) },
@@ -43,17 +47,47 @@ test('startAttempt persists a stable attempt, sends one signed-provider operatio
   assert.equal(JSON.stringify(result).includes('260763456789'), false)
 })
 
+test('startAttempt sends whole-number amounts as integers for a NONE-decimal network', async () => {
+  const calls = []
+  const noDecimalOption = { ...mtnDepositOption, decimals_in_amount: 'NONE' }
+  const service = createPublicPaymentService({
+    repository: {
+      getPublicLink: async () => baseLink,
+      createAttempt: async (input) => ({ link: baseLink, attempt: { ...baseAttempt, ...input }, replayed: false }),
+      updateAttempt: async (_id, changes) => ({ ...baseAttempt, ...changes }),
+    },
+    idFactory: () => attemptId,
+    providerRegistry: {
+      getActiveNetworks: async () => [noDecimalOption],
+      get: () => ({ initiateDeposit: async (input) => { calls.push(input); return { depositId: attemptId, status: 'ACCEPTED' } }, getDepositStatus: async () => null }),
+    },
+  })
+  await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
+  assert.equal(calls[0].amount, '125')
+})
+
 test('startAttempt replays the same idempotency key without a second provider call', async () => {
   let calls = 0
+  const requestFingerprint = crypto.createHash('sha256').update(JSON.stringify(['MTN_MOMO_ZMB', '260763456789'])).digest('hex')
   const service = createPublicPaymentService({
-    repository: { createAttempt: async () => ({ attempt: { ...baseAttempt, state: 'UNKNOWN' }, replayed: true }) },
+    repository: { getAttemptByIdempotency: async () => ({ ...baseAttempt, request_fingerprint: requestFingerprint, state: 'UNKNOWN' }) },
     idFactory: () => attemptId,
-    providerRegistry: { getNetworks: () => [mtnNetwork], get: () => ({ initiateDeposit: async () => { calls++; return {} }, getDepositStatus: async () => null }) },
+    providerRegistry: { getActiveNetworks: async () => { throw new Error('configuration temporarily unavailable') }, get: () => ({ initiateDeposit: async () => { calls++; return {} }, getDepositStatus: async () => null }) },
   })
   const result = await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
   assert.equal(result.replayed, true)
   assert.equal(result.attempt.status, 'UNKNOWN')
   assert.equal(calls, 0)
+})
+
+test('startAttempt rejects changed payloads for a previously used idempotency key', async () => {
+  let configLookups = 0
+  const service = createPublicPaymentService({
+    repository: { getAttemptByIdempotency: async () => ({ request_fingerprint: 'a'.repeat(64) }) },
+    providerRegistry: { getActiveNetworks: async () => { configLookups++; return [] } },
+  })
+  await assert.rejects(service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey), { code: 'IDEMPOTENCY_CONFLICT', statusCode: 409 })
+  assert.equal(configLookups, 0)
 })
 
 test('verified provider success remains pending ITC credit when the finance client is unavailable', async () => {
@@ -108,6 +142,29 @@ test('confirmed PawaPay success posts the explicit link target and issues a rece
   assert.equal(calls[0].payload.revenue_account_code, '4000')
   assert.match(calls[0].key, /^ew-collect-[a-f0-9]{64}$/)
   assert.deepEqual(calls[1], { id: attemptId, operationId: succeeded.ledger_operation_id })
+})
+
+test('integer PawaPay amount evidence matches the fixed two-decimal ledger amount exactly', async () => {
+  const attempt = {
+    ...baseAttempt, state: 'PENDING', payment_link_id: '40000000-0000-4000-8000-000000000001',
+    created_by_customer_id: '50000000-0000-4000-8000-000000000001', collection_target_type: 'REVENUE', revenue_account_code: '4000',
+  }
+  let update
+  const service = createPublicPaymentService({
+    repository: {
+      getPublicAttempt: async () => attempt,
+      updateAttempt: async (_id, changes) => { update = changes; return { ...attempt, ...changes, verified_at: '2026-10-15T12:01:00.000Z', provider_evidence_digest: changes.evidenceDigest } },
+      markAttemptSucceeded: async (_id, operationId) => ({ ...attempt, state: 'SUCCEEDED', ledger_operation_id: operationId }),
+    },
+    itcFinanceClient: { postEarnedRevenueCollection: async () => ({ operation: { operation_id: '30000000-0000-4000-8000-000000000001' } }) },
+    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => [{
+      depositId: attemptId, status: 'COMPLETED', requestedAmount: '125', depositedAmount: '125', currency: 'ZMW', country: 'ZMB',
+      payer: { type: 'MSISDN', address: { value: '260763456789' } }, correspondent: 'MTN_MOMO_ZMB', providerTransactionId: 'provider-ref-integer',
+    }] }) },
+  })
+  const result = await service.refreshAttempt(token, attemptId)
+  assert.equal(update.verified, true)
+  assert.equal(result.status, 'SUCCEEDED')
 })
 
 test('verified pending collection retries the same ITC operation without another provider status call', async () => {
@@ -170,15 +227,23 @@ test('startAttempt rejects non-Zambian or malformed phone numbers before persist
   assert.equal(persisted, false)
 })
 
-test('getLink advertises only networks enabled by the provider registry', async () => {
+test('getLink advertises active provider options, including amount and authorization requirements', async () => {
   const service = createPublicPaymentService({
     repository: { getPublicLink: async () => ({ payment_link_id: 'link-1', description: 'Invoice', amount: '125.00', currency: 'ZMW' }) },
-    providerRegistry: { getNetworks: () => [mtnNetwork] },
+    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption] },
   })
   assert.deepEqual(await service.getLink(token), {
     payment_link_id: 'link-1', description: 'Invoice', amount: '125.00', currency: 'ZMW',
-    available_networks: [{ code: 'MTN_MOMO_ZMB', label: 'MTN MoMo' }],
+    available_networks: [{ code: 'MTN_MOMO_ZMB', label: 'MTN MoMo', min_amount: '1', max_amount: '5000', decimals_in_amount: 'TWO_PLACES', auth_type: 'PROVIDER_AUTH', pin_prompt: 'AUTOMATIC' }],
   })
+})
+
+test('getLink hides configured networks whose amount rules cannot accept the fixed link amount', async () => {
+  const service = createPublicPaymentService({
+    repository: { getPublicLink: async () => ({ ...baseLink, amount: '125.50' }) },
+    providerRegistry: { getActiveNetworks: async () => [{ ...mtnDepositOption, decimals_in_amount: 'NONE' }] },
+  })
+  assert.deepEqual((await service.getLink(token)).available_networks, [])
 })
 
 test('A/R attempts reserve the full delivered invoice before PawaPay and post with the reservation after verified success', async () => {
@@ -190,6 +255,7 @@ test('A/R attempts reserve the full delivered invoice before PawaPay and post wi
   }
   const service = createPublicPaymentService({
     repository: {
+      getPublicLink: async () => link,
       createAttempt: async (input) => ({ link, attempt: { ...baseAttempt, ...input, payment_link_id: link.payment_link_id }, replayed: false }),
       updateAttempt: async (_id, update) => ({ ...baseAttempt, ...update }),
     },
@@ -198,7 +264,7 @@ test('A/R attempts reserve the full delivered invoice before PawaPay and post wi
       return { reservation: { reservation_id: payload.reservation_id, state: 'ACTIVE' } }
     } },
     idFactory: () => attemptId,
-    providerRegistry: { getNetworks: () => [mtnNetwork], get: () => ({
+    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], get: () => ({
       initiateDeposit: async (input) => { calls.push({ type: 'provider', input }); return { depositId: attemptId, status: 'ACCEPTED' } },
       getDepositStatus: async () => null,
     }) },
@@ -247,22 +313,32 @@ test('A/R collection posts through ITC with its reservation and closes the attem
 test('startAttempt rejects a network absent from provider capabilities before persistence', async () => {
   let persisted = false
   const service = createPublicPaymentService({
-    repository: { createAttempt: async () => { persisted = true } },
-    providerRegistry: { getNetworks: () => [mtnNetwork], get: () => assert.fail('must not create a provider client') },
+    repository: { getPublicLink: async () => baseLink, createAttempt: async () => { persisted = true } },
+    providerRegistry: { getActiveNetworks: async () => [], get: () => assert.fail('must not create a provider client') },
   })
   await assert.rejects(service.startAttempt(token, { network_code: 'ZAMTEL_ZMB', phone_number: '260953456789' }, idempotencyKey), { code: 'INVALID_PAYMENT_ATTEMPT' })
   assert.equal(persisted, false)
 })
 
-test('startAttempt fails closed when multiple providers advertise the same network', async () => {
+test('startAttempt fails closed when active configuration advertises the same network from multiple providers', async () => {
   let persisted = false
   const service = createPublicPaymentService({
-    repository: { createAttempt: async () => { persisted = true } },
-    providerRegistry: { getNetworks: () => [mtnNetwork, { ...mtnNetwork, provider_code: 'another_provider' }] },
+    repository: { getPublicLink: async () => baseLink, createAttempt: async () => { persisted = true } },
+    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption, { ...mtnDepositOption, provider_code: 'another_provider' }] },
   })
   await assert.rejects(
     service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey),
     { code: 'PAYMENT_NETWORK_ROUTE_AMBIGUOUS', statusCode: 503 },
   )
+  assert.equal(persisted, false)
+})
+
+test('startAttempt fails closed when provider active configuration cannot be confirmed', async () => {
+  let persisted = false
+  const service = createPublicPaymentService({
+    repository: { getPublicLink: async () => baseLink, createAttempt: async () => { persisted = true } },
+    providerRegistry: { getActiveNetworks: async () => { throw new Error('provider config unavailable') } },
+  })
+  await assert.rejects(service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey), { code: 'PAYMENT_PROVIDER_UNAVAILABLE', statusCode: 503 })
   assert.equal(persisted, false)
 })
