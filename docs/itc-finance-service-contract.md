@@ -39,6 +39,8 @@ Expose this contract only on the private service network. Authenticate each requ
 
 Headers: `X-ITC-Key-Id`, `X-ITC-Timestamp` (Unix seconds), `X-ITC-Nonce` (UUID), `X-ITC-Signature` (base64url), `X-Request-Id`, and `Idempotency-Key` for mutations. Enforce a short timestamp window, constant-time signature comparison, a durable unique nonce claim, exact path/method binding, key rotation by key ID, bounded body size, and TLS. No browser cookie or caller-supplied actor identity is accepted as service authentication. The signed payload includes the initiating Expense Warrior actor and request ID for audit attribution. Secrets stay in environment/secret storage and are never logged.
 
+For local configuration, generate a 32-byte random secret with `openssl rand -base64 32`. Set the same key ID and base64 value in Expense Warrior's `ITC_SERVICE_CLIENT_ID` and `ITC_SERVICE_CLIENT_SECRET`, and in ITC's `EXPENSE_WARRIOR_SERVICE_KEYS_JSON` map. Keep `EXPENSE_WARRIOR_FINANCE_ENABLED=false` until the target migration checksums, Treasury mapping, provider readiness, and reconciliation gates are verified.
+
 ## Version 1 endpoints
 
 All amounts are decimal strings with exactly two fractional digits; currency is `ZMW`. Every mutation requires a UUID idempotency key and a stable caller-generated operation ID. Replaying the same key and fingerprint returns the original result; reusing it with different data returns `409 IDEMPOTENCY_CONFLICT`.
