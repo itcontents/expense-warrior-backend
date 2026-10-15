@@ -351,6 +351,33 @@ test('startAttempt rejects a network absent from provider capabilities before pe
   assert.equal(persisted, false)
 })
 
+test('startAttempt hides and rejects network auth modes unsupported by the phone-prompt flow', async () => {
+  let persisted = false
+  const preAuthNetwork = { ...mtnDepositOption, auth_type: 'PREAUTH' }
+  const service = createPublicPaymentService({
+    repository: { getPublicLink: async () => baseLink, createAttempt: async () => { persisted = true } },
+    providerRegistry: { getActiveNetworks: async () => [preAuthNetwork] },
+  })
+
+  const link = await service.getLink(token)
+  assert.deepEqual(link.available_networks, [])
+  await assert.rejects(
+    service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey),
+    { code: 'INVALID_PAYMENT_ATTEMPT' },
+  )
+  assert.equal(persisted, false)
+})
+
+test('startAttempt hides networks without an automatic provider auth prompt', async () => {
+  const manualPromptNetwork = { ...mtnDepositOption, pin_prompt: 'MANUAL' }
+  const service = createPublicPaymentService({
+    repository: { getPublicLink: async () => baseLink },
+    providerRegistry: { getActiveNetworks: async () => [manualPromptNetwork] },
+  })
+  const link = await service.getLink(token)
+  assert.deepEqual(link.available_networks, [])
+})
+
 test('startAttempt fails closed when active configuration advertises the same network from multiple providers', async () => {
   let persisted = false
   const service = createPublicPaymentService({

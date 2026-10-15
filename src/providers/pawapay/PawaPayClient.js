@@ -141,6 +141,9 @@ function depositOptionsFromConfiguration(configuration, { country = 'ZMB', curre
         typeof operation.authType !== 'string' || !operation.authType.trim()) {
       throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
     }
+    // V1 relies on the provider sending an authorization prompt. PREAUTH needs
+    // an additional code in the deposit request that this payer flow never collects.
+    if (operation.authType !== 'PROVIDER_AUTH' || operation.pinPrompt !== 'AUTOMATIC') continue
     result.push({
       ...network,
       min_amount: minAmount,

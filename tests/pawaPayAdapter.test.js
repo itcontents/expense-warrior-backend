@@ -179,7 +179,7 @@ test('deposit options come only from operational Zambia ZMW entries in active co
         companyName: 'Merchant',
         countries: [{ country: 'ZMB', providers: [
           { provider: 'MTN_MOMO_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ DEPOSIT: { status: 'OPERATIONAL', minTransactionLimit: '5', maxTransactionLimit: '2500', decimalsInAmount: 'TWO_PLACES', authType: 'PROVIDER_AUTH', pinPrompt: 'AUTOMATIC' } }] }] },
-          { provider: 'AIRTEL_OAPI_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ operationType: 'DEPOSIT', status: 'CLOSED', minTransactionLimit: '1', maxTransactionLimit: '1000', decimalsInAmount: 'TWO_PLACES', authType: 'PROVIDER_AUTH' }] }] },
+          { provider: 'AIRTEL_OAPI_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ operationType: 'DEPOSIT', status: 'OPERATIONAL', minTransactionLimit: '1', maxTransactionLimit: '1000', decimalsInAmount: 'TWO_PLACES', authType: 'PREAUTH' }] }] },
           { provider: 'ZAMTEL_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ operationType: 'DEPOSIT', status: 'DELAYED', minTransactionLimit: '1', maxTransactionLimit: '1000', decimalsInAmount: 'NONE', authType: 'PROVIDER_AUTH' }] }] },
           { provider: 'UNSUPPORTED_ZMB', currencies: [{ currency: 'ZMW', operationTypes: [{ operationType: 'DEPOSIT', status: 'OPERATIONAL' }] }] },
         ] }, { country: 'MWI', providers: [] }],

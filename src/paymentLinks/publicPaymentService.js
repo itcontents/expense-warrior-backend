@@ -12,6 +12,8 @@ const RECEIPT_NETWORKS = Object.freeze({
   ZAMTEL_ZMB: 'Zamtel Kwacha',
 })
 const isReceivableLink = (link) => link?.collection_target_type === 'AR_SETTLEMENT'
+const supportsPublicPhonePrompt = (network) =>
+  network?.auth_type === 'PROVIDER_AUTH' && network?.pin_prompt === 'AUTOMATIC'
 
 async function reserveReceivableAttempt(itcFinanceClient, link, attempt) {
   if (!isReceivableLink(link)) return true
@@ -85,7 +87,7 @@ async function getUniqueNetwork(providerRegistry, networkCode, link) {
   try { availableNetworks = await getDepositNetworks(providerRegistry) }
   catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE', 503) }
   const matching = availableNetworks
-    .filter((network) => network.code === networkCode && providerAmount(link.amount, network) !== null)
+    .filter((network) => network.code === networkCode && supportsPublicPhonePrompt(network) && providerAmount(link.amount, network) !== null)
   if (matching.length > 1) throw new PaymentLinkError('PAYMENT_NETWORK_ROUTE_AMBIGUOUS', 503)
   return matching[0] || null
 }
@@ -115,7 +117,7 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         amount: link.amount,
         currency: link.currency,
         available_networks: availableNetworks
-          .filter((network) => link.currency === 'ZMW' && networkCounts.get(network.code) === 1 && providerAmount(link.amount, network) !== null)
+          .filter((network) => link.currency === 'ZMW' && networkCounts.get(network.code) === 1 && supportsPublicPhonePrompt(network) && providerAmount(link.amount, network) !== null)
           .map(({ code, label, min_amount, max_amount, decimals_in_amount, auth_type, pin_prompt }) => ({
             code, label, min_amount, max_amount, decimals_in_amount, auth_type,
             ...(pin_prompt ? { pin_prompt } : {}),
