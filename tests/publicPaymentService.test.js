@@ -32,7 +32,9 @@ test('startAttempt persists a stable attempt, sends one signed-provider operatio
   const service = createPublicPaymentService({
     repository,
     idFactory: () => attemptId,
-    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], get: () => ({
+    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], getAccountIdentity: () => ({
+      provider_account_id: '80000000-0000-4000-8000-000000000001', provider_account_version: 2,
+    }), get: () => ({
       initiateDeposit: async (input) => { calls.push(input); return { depositId: attemptId, status: 'ACCEPTED' } },
       getDepositStatus: async () => null,
     }) },
@@ -264,7 +266,9 @@ test('A/R attempts reserve the full delivered invoice before PawaPay and post wi
       return { reservation: { reservation_id: payload.reservation_id, state: 'ACTIVE' } }
     } },
     idFactory: () => attemptId,
-    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], get: () => ({
+    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], getAccountIdentity: () => ({
+      provider_account_id: '80000000-0000-4000-8000-000000000001', provider_account_version: 2,
+    }), get: () => ({
       initiateDeposit: async (input) => { calls.push({ type: 'provider', input }); return { depositId: attemptId, status: 'ACCEPTED' } },
       getDepositStatus: async () => null,
     }) },
@@ -277,6 +281,30 @@ test('A/R attempts reserve the full delivered invoice before PawaPay and post wi
   assert.equal(calls[0].key, `ew-ar-reserve-${attemptId}`)
 })
 
+test('A/R payment attempt refuses to start if the ITC provider account identity is missing', async () => {
+  let persisted = false
+  const link = {
+    ...baseLink, collection_target_type: 'AR_SETTLEMENT',
+    customer_id: '50000000-0000-4000-8000-000000000001',
+    receivable_id: '60000000-0000-4000-8000-000000000001',
+  }
+  const service = createPublicPaymentService({
+    repository: { getPublicLink: async () => link, createAttempt: async () => { persisted = true } },
+    providerRegistry: {
+      getActiveNetworks: async () => [mtnDepositOption],
+      get: () => ({
+        initiateDeposit: async () => assert.fail('must not initiate a provider deposit'),
+        getDepositStatus: async () => null,
+      }),
+    },
+  })
+  await assert.rejects(
+    service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey),
+    { code: 'PAYMENT_PROVIDER_CONFIGURATION_UNAVAILABLE', statusCode: 503 },
+  )
+  assert.equal(persisted, false)
+})
+
 test('A/R collection posts through ITC with its reservation and closes the attempt only after application', async () => {
   const calls = []
   const attempt = {
@@ -284,6 +312,7 @@ test('A/R collection posts through ITC with its reservation and closes the attem
     created_by_customer_id: '70000000-0000-4000-8000-000000000001',
     collection_target_type: 'AR_SETTLEMENT', customer_id: '50000000-0000-4000-8000-000000000001',
     receivable_id: '60000000-0000-4000-8000-000000000001',
+    provider_account_id: '80000000-0000-4000-8000-000000000001', provider_account_version: 2,
   }
   const success = { ...attempt, state: 'SUCCEEDED', ledger_operation_id: '30000000-0000-4000-8000-000000000001' }
   const service = createPublicPaymentService({
@@ -307,6 +336,8 @@ test('A/R collection posts through ITC with its reservation and closes the attem
   assert.equal(calls[0].payload.reservation_id, attemptId)
   assert.equal(calls[0].payload.receivable_id, attempt.receivable_id)
   assert.equal(calls[0].payload.amount, '125.00')
+  assert.equal(calls[0].payload.provider_account_id, attempt.provider_account_id)
+  assert.equal(calls[0].payload.provider_account_version, 2)
   assert.equal(calls[1].type, 'complete')
 })
 

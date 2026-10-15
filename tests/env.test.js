@@ -74,9 +74,22 @@ test('PawaPay callback inbox is disabled by default and can be explicitly enable
     PAWAPAY_COLLECTIONS_ENABLED: 'true',
     PAWAPAY_PAYOUTS_ENABLED: 'true',
     PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED: 'true',
+    ITC_PAWAPAY_PROVIDER_ACCOUNT_ID: '70000000-0000-4000-8000-000000000001',
+    ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION: '2',
   }
   assert.equal(loadConfig(confirmedFinancialOperations).pawaPay.collectionsEnabled, true)
   assert.equal(loadConfig(confirmedFinancialOperations).pawaPay.payoutsEnabled, true)
+  assert.equal(loadConfig(confirmedFinancialOperations).pawaPay.providerAccountVersion, 2)
+})
+
+test('PawaPay collections require an explicit matching ITC provider account identity', () => {
+  const values = {
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1', PAWAPAY_COLLECTIONS_ENABLED: 'true',
+    PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED: 'true',
+  }
+  assert.throws(() => loadConfig(values), (error) => error.code === 'CONFIG_INVALID' &&
+    error.details.includes('ITC_PAWAPAY_PROVIDER_ACCOUNT_ID'))
 })
 
 test('loadConfig requires Cloudinary credentials as a complete set', () => {
@@ -112,6 +125,8 @@ test('financial PawaPay operations require explicit account-level signed-only co
     PAWAPAY_COLLECTIONS_ENABLED: 'true',
     PAWAPAY_PAYOUTS_ENABLED: 'true',
     PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED: 'true',
+    ITC_PAWAPAY_PROVIDER_ACCOUNT_ID: '70000000-0000-4000-8000-000000000001',
+    ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION: '2',
   })
   assert.equal(config.pawaPay.signedRequestsOnlyConfirmed, true)
 })

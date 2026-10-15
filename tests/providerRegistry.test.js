@@ -39,6 +39,17 @@ test('PawaPay exposes its configured Zambian deposit and payout networks separat
   assert.deepEqual(registry.getNetworks('pawapay', 'balance'), [])
 })
 
+test('provider registry exposes a validated configured account identity for internal collection posting', () => {
+  const registry = createProviderRegistry({ pawaPayConfig: {
+    providerAccountId: '70000000-0000-4000-8000-000000000001', providerAccountVersion: 4,
+  } })
+  assert.deepEqual(registry.getAccountIdentity('pawapay'), {
+    provider_account_id: '70000000-0000-4000-8000-000000000001', provider_account_version: 4,
+  })
+  assert.throws(() => createProviderRegistry({ pawaPayConfig: {} }).getAccountIdentity('pawapay'), (error) =>
+    error instanceof ProviderRegistryError && error.code === 'PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE')
+})
+
 test('active payment options are resolved through the provider adapter', async () => {
   let requestedUrl
   const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' })

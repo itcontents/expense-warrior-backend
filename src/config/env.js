@@ -23,6 +23,8 @@ const configSchema = Joi.object({
   SMTP_PASS: Joi.string().allow('').default(''),
   EMAIL_FROM: Joi.string().allow('').default(''),
   PAWAPAY_API_TOKEN: Joi.string().allow('').default(''),
+  ITC_PAWAPAY_PROVIDER_ACCOUNT_ID: Joi.string().guid({ version: ['uuidv4'] }).allow('').default(''),
+  ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION: Joi.number().integer().min(1).allow('').default(''),
   PAWAPAY_BASE_URL: Joi.string().valid('https://api.sandbox.pawapay.io', 'https://api.pawapay.io').default('https://api.sandbox.pawapay.io'),
   PAWAPAY_DEPOSITS_CALLBACK_URL: Joi.string().uri({ scheme: ['https'] }).allow('').default(''),
   PAWAPAY_PAYOUTS_CALLBACK_URL: Joi.string().uri({ scheme: ['https'] }).allow('').default(''),
@@ -68,6 +70,14 @@ function loadConfig(source = process.env) {
     const failure = new Error('PawaPay financial operations require confirmed signed-requests-only account configuration')
     failure.code = 'CONFIG_INVALID'
     failure.details = ['PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED']
+    throw failure
+  }
+
+  if (value.PAWAPAY_COLLECTIONS_ENABLED &&
+      (!value.ITC_PAWAPAY_PROVIDER_ACCOUNT_ID || !value.ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION)) {
+    const failure = new Error('PawaPay collections require the matching ITC provider account identity')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['ITC_PAWAPAY_PROVIDER_ACCOUNT_ID', 'ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION']
     throw failure
   }
 
@@ -126,6 +136,8 @@ function loadConfig(source = process.env) {
     pawaPay: Object.freeze({
       baseUrl: value.PAWAPAY_BASE_URL,
       apiToken: value.PAWAPAY_API_TOKEN,
+      providerAccountId: value.ITC_PAWAPAY_PROVIDER_ACCOUNT_ID || null,
+      providerAccountVersion: value.ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION ? Number(value.ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION) : null,
       signatureEnabled: value.PAWAPAY_SIGNATURE_ENABLED,
       signedRequestsOnlyConfirmed: value.PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED,
       collectionsEnabled: value.PAWAPAY_COLLECTIONS_ENABLED,

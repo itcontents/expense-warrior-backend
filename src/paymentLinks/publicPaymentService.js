@@ -151,6 +151,16 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE') }
       if (!provider) throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE')
 
+      let providerAccountIdentity = null
+      if (isReceivableLink(link)) {
+        try {
+          providerAccountIdentity = providerRegistry?.getAccountIdentity?.(providerCode) || null
+        } catch (_error) {
+          throw new PaymentLinkError('PAYMENT_PROVIDER_CONFIGURATION_UNAVAILABLE', 503)
+        }
+        if (!providerAccountIdentity) throw new PaymentLinkError('PAYMENT_PROVIDER_CONFIGURATION_UNAVAILABLE', 503)
+      }
+
       const prepared = await repository.createAttempt({
         tokenHash,
         idempotencyKey,
@@ -159,6 +169,8 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         providerCode,
         networkCode: input.network_code,
         phoneNumber: input.phone_number,
+        providerAccountId: providerAccountIdentity?.provider_account_id || null,
+        providerAccountVersion: providerAccountIdentity?.provider_account_version || null,
       })
       const shouldResumeArReservation = prepared.replayed && isReceivableLink(prepared.link) &&
         ['SUBMITTING', 'UNKNOWN'].includes(prepared.attempt.state) &&
@@ -369,6 +381,8 @@ async function postConfirmedCollection(repository, itcFinanceClient, attempt) {
     collection_attempt_id: attempt.attempt_id,
     actor_customer_id: attempt.created_by_customer_id,
     provider_code: attempt.provider_code,
+    provider_account_id: attempt.provider_account_id || null,
+    provider_account_version: attempt.provider_account_version || null,
     provider_transaction_id: attempt.provider_transaction_id,
     provider_reference: attempt.provider_reference || attempt.provider_transaction_id,
     amount: attempt.amount,

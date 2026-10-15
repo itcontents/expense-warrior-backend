@@ -16,6 +16,10 @@ function createProviderRegistry({ pawaPayConfig, dependencies = {}, additionalPr
       if (!pawapayClient) pawapayClient = new PawaPayClient(pawaPayConfig, dependencies.pawapay)
       return pawapayClient
     },
+    getAccountIdentity: () => ({
+      provider_account_id: pawaPayConfig?.providerAccountId,
+      provider_account_version: pawaPayConfig?.providerAccountVersion,
+    }),
     getNetworks: (operation) => PawaPayClient.getNetworks(operation),
     getActiveNetworks: (operation, options) => operation === 'deposit'
       ? definitions.get('pawapay').create().getDepositNetworkOptions(options)
@@ -39,6 +43,22 @@ function createProviderRegistry({ pawaPayConfig, dependencies = {}, additionalPr
       const definition = definitions.get(code)
       if (!definition) throw new ProviderRegistryError('PAYMENT_PROVIDER_UNSUPPORTED', 422)
       return definition.create()
+    },
+    getAccountIdentity(providerCode) {
+      const code = String(providerCode || '').trim().toLowerCase()
+      const definition = definitions.get(code)
+      if (!definition) throw new ProviderRegistryError('PAYMENT_PROVIDER_UNSUPPORTED', 422)
+      const identity = typeof definition.getAccountIdentity === 'function'
+        ? definition.getAccountIdentity()
+        : definition.accountIdentity
+      if (!identity || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(identity.provider_account_id || '')) ||
+          !Number.isSafeInteger(Number(identity.provider_account_version)) || Number(identity.provider_account_version) <= 0) {
+        throw new ProviderRegistryError('PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE', 503)
+      }
+      return {
+        provider_account_id: String(identity.provider_account_id).toLowerCase(),
+        provider_account_version: Number(identity.provider_account_version),
+      }
     },
     getForOperation(providerCode, operation) {
       const code = String(providerCode || '').trim().toLowerCase()

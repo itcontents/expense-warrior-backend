@@ -19,6 +19,7 @@ function createPaymentLinkRepository({ pool } = {}) {
                a.provider_transaction_id, a.network_code, a.payer_phone, a.amount::text, a.currency,
                a.state, a.provider_status, a.provider_reference, a.created_at, a.updated_at,
                a.verified_at, a.ledger_operation_id, a.provider_evidence_digest,
+               a.provider_account_id, a.provider_account_version,
                l.public_token_hash, l.description, l.collection_target_type, l.revenue_account_code,
                l.customer_id, l.receivable_id, l.created_by_customer_id
           FROM payment_link_attempts a
@@ -44,7 +45,8 @@ function createPaymentLinkRepository({ pool } = {}) {
         if (!link) throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
         const priorResult = await client.query(`
           SELECT attempt_id, payment_link_id, request_fingerprint, provider_transaction_id, network_code,
-                 payer_phone, amount::text, currency, state, provider_status, created_at, updated_at
+                 payer_phone, amount::text, currency, state, provider_status, created_at, updated_at,
+                 provider_account_id, provider_account_version
             FROM payment_link_attempts
            WHERE payment_link_id = $1 AND idempotency_key = $2
            FOR UPDATE
@@ -60,12 +62,14 @@ function createPaymentLinkRepository({ pool } = {}) {
           INSERT INTO payment_link_attempts (
             attempt_id, payment_link_id, idempotency_key, request_fingerprint,
             provider_code, provider_transaction_id, network_code, payer_phone,
-            amount, currency, state
-          ) VALUES ($1,$2,$3,$4,$5,$1,$6,$7,$8,$9,'SUBMITTING')
+            amount, currency, state, provider_account_id, provider_account_version
+          ) VALUES ($1,$2,$3,$4,$5,$1,$6,$7,$8,$9,'SUBMITTING',$10,$11)
           RETURNING attempt_id, payment_link_id, provider_transaction_id, network_code,
-                    payer_phone, amount::text, currency, state, provider_status, created_at, updated_at
+                    payer_phone, amount::text, currency, state, provider_status, created_at, updated_at,
+                    provider_account_id, provider_account_version
         `, [input.attemptId, link.payment_link_id, input.idempotencyKey, input.requestFingerprint,
-          input.providerCode, input.networkCode, input.phoneNumber, link.amount, link.currency])
+          input.providerCode, input.networkCode, input.phoneNumber, link.amount, link.currency,
+          input.providerAccountId || null, input.providerAccountVersion || null])
         await client.query('COMMIT')
         return { link, attempt: inserted.rows[0], replayed: false }
       } catch (error) {
@@ -81,6 +85,7 @@ function createPaymentLinkRepository({ pool } = {}) {
                a.amount::text, a.currency, a.state, a.provider_status, a.provider_reference,
                a.created_at, a.updated_at, a.verified_at, a.ledger_operation_id,
                a.provider_evidence_digest,
+               a.provider_account_id, a.provider_account_version,
                a.payment_link_id, l.public_token_hash, l.description,
                l.collection_target_type, l.revenue_account_code, l.customer_id, l.receivable_id,
                l.created_by_customer_id
@@ -105,12 +110,14 @@ function createPaymentLinkRepository({ pool } = {}) {
         RETURNING attempt_id, provider_transaction_id, network_code, payer_phone,
                   amount::text, currency, state, provider_status, provider_reference,
                   created_at, updated_at, verified_at, ledger_operation_id, provider_evidence_digest
+                  , provider_account_id, provider_account_version
       `, [attemptId, state, providerStatus, providerReference, errorCode, verified, evidenceDigest])
       if (!result.rows[0]) {
         const current = await pool.query(`
           SELECT attempt_id, provider_transaction_id, network_code, payer_phone,
                  amount::text, currency, state, provider_status, created_at, updated_at,
                  verified_at, ledger_operation_id, provider_evidence_digest
+                 , provider_account_id, provider_account_version
             FROM payment_link_attempts WHERE attempt_id = $1 LIMIT 1
         `, [attemptId])
         if (!current.rows[0]) throw new PaymentLinkError('PAYMENT_ATTEMPT_UNAVAILABLE')
