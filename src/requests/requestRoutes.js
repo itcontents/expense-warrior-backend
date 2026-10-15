@@ -115,7 +115,6 @@ function createRequestRouter({ identityClient, requestService, pool, attachmentS
       res.set('X-Content-Type-Options', 'nosniff')
       res.set('Content-Type', attachment.media_type)
       res.set('Content-Disposition', 'inline')
-      if (Number.isSafeInteger(attachment.file_size_bytes)) res.set('Content-Length', String(attachment.file_size_bytes))
       image.on('error', () => {
         if (res.headersSent) res.destroy()
         else res.status(503).end()

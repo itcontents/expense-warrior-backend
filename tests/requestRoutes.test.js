@@ -74,6 +74,7 @@ test('requestRoutes_servesAuthorizedEvidenceInlineAsTheValidatedImageType', asyn
       assert.match(response.headers.get('content-disposition'), /^inline\b/)
       assert.equal(response.headers.get('cache-control'), 'private, no-store')
       assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+      assert.equal(response.headers.get('content-length'), null)
       assert.equal(Buffer.from(await response.arrayBuffer()).length, 8)
   })
 })
