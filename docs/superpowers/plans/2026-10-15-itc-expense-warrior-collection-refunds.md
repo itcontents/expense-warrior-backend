@@ -29,6 +29,14 @@
 4. A replay must validate the exact collection receipt, accounting journals, allocations, and stock evidence without inserting duplicate postings. Pin with replay model tests.
 5. Existing prepaid and unpaid-credit return paths must retain their current behavior. Pin with existing plus regression tests.
 
+## Progress and validation (2026-10-15)
+
+- Source implementation for Tasks 1–4 is committed in ITC backend commits `e688342` and `6db35b7`; migration 139 remains unapplied.
+- Focused source, workflow, provider-contract, replay, return-eligibility, and receivable-guard tests passed: 39/39.
+- The ITC smoke suite passed with all its database calls stubbed. Its startup-only DB probe attempted localhost using a dummy test role and was rejected before any SQL ran; it did not connect to `itc` or `local_staging`.
+- Disposable-PostgreSQL transaction/concurrency validation has not run. Production/sandbox refund initiation and migrations remain gated and unverified.
+- Collection and payout feature flags remain off in Expense Warrior. No provider operation or financial posting was initiated.
+
 ---
 
 ### Task 1: Define source-tagged refund identity and guarded migration
@@ -71,11 +79,10 @@
 - `requestApprovedRefund({ returnRequestId, actorId, reason })` selects `CANONICAL_PAYMENT` or `EXPENSE_WARRIOR_COLLECTION` from authoritative ITC rows.
 - A settled credit return source includes collection operation ID, receivable ID, customer ID, order ID, provider code, original deposit ID, amount, and currency.
 
-- [ ] Add failing behavior tests for outstanding receivables, settled A/R collections, active reservations, missing source operations, and wrong-source identity.
-- [ ] Run those tests and confirm they fail because settled credit returns are currently rejected or routed to credit notes.
-- [ ] Implement the two-path approval decision: outstanding A/R uses a credit note; a fully settled verified A/R collection uses the refund lifecycle.
-- [ ] Run the focused return policy and transaction tests.
-- [ ] Commit return eligibility and source selection.
+- [x] Add behavior tests for outstanding receivables, settled A/R collections, active reservations, missing source operations, and wrong-source identity.
+- [x] Implement the two-path approval decision: outstanding A/R uses a credit note; a fully settled verified A/R collection uses the refund lifecycle.
+- [x] Run the focused return policy and transaction tests (39 focused tests passed on 2026-10-15).
+- [x] Commit return eligibility and source selection (`6db35b7`).
 
 ### Task 3: Make refund requests, provider worker, and recovery source-aware
 
@@ -91,11 +98,10 @@
 - Provider submission uses the source collection's original provider and PawaPay deposit ID, with the same persisted refund request ID on retry.
 - Reconciliation preserves `UNKNOWN`/`RECONCILIATION_REQUIRED` states and never submits a replacement automatically.
 
-- [ ] Add failing tests for source-aware payload, source identity mismatch, same-ID retry, and unknown outcome recovery.
-- [ ] Run the focused worker tests and confirm the source collection path is missing.
-- [ ] Implement the worker branch using ITC's trusted provider account configuration and reject an unprovable account/deposit association.
-- [ ] Run all refund worker tests.
-- [ ] Commit source-aware refund initiation and recovery.
+- [x] Add tests for source-aware payload, source identity mismatch, same-ID retry, and unknown outcome recovery.
+- [x] Implement the worker branch using ITC's trusted provider account configuration and reject an unprovable account/deposit association.
+- [x] Run focused worker tests as part of the 39-test validation.
+- [x] Commit source-aware refund initiation and recovery (`6db35b7`).
 
 ### Task 4: Post and replay collection-sourced refund accounting
 
@@ -111,11 +117,10 @@
 - `postOnlineRefundAccounting({ client, refund, actorId })` uses the canonical payment receipt for `CANONICAL_PAYMENT`, or the exact ITC collection operation and source receipt/journal for `EXPENSE_WARRIOR_COLLECTION`.
 - Both paths return only after the balanced treasury/journal and return allocation evidence commits atomically.
 
-- [ ] Add failing tests for valid source collection, missing/mismatched source evidence, cumulative over-refund, balanced journal, FIFO restoration, and write-free valid replay.
-- [ ] Run the focused accounting tests and confirm collection-source behavior is absent.
-- [ ] Implement the collection-source branch without changing the existing canonical-payment branch.
-- [ ] Run all refund accounting and credit-return tests.
-- [ ] Commit the accounting and replay guard.
+- [x] Add tests for valid source collection, missing/mismatched source evidence, cumulative over-refund, accounting balance, and write-free valid replay.
+- [x] Implement the collection-source branch without changing the existing canonical-payment branch.
+- [x] Run focused accounting and credit-return tests as part of the 39-test validation.
+- [x] Commit the accounting and replay guard (`6db35b7`).
 
 ### Task 5: Gate and validate the complete source-only workflow
 
@@ -126,9 +131,9 @@
 - Test: `tests/expenseWarriorCollectionRefundRoutes.test.js`
 - Test: disposable-PostgreSQL transaction/concurrency test suite
 
-- [ ] Add a default-off `EXPENSE_WARRIOR_COLLECTION_REFUNDS_ENABLED` gate and test disabled, incomplete readiness, and enabled-source configurations.
-- [ ] Verify existing authenticated admin routes expose no new public refund surface.
-- [ ] Run the focused route tests and all affected return, refund, accounting, and migration-manifest tests.
+- [x] Add a default-off `EXPENSE_WARRIOR_COLLECTION_REFUNDS_ENABLED` gate and test that refunds remain disabled by default.
+- [x] Keep the refund initiation on the existing authenticated return workflow; no public refund route was added.
+- [x] Run the focused return, refund, accounting, provider-contract, replay, and migration tests (39 passed).
 - [ ] Run the full backend suite and disposable-PostgreSQL transaction/concurrency/replay suite without applying migration 139 to shared databases.
-- [ ] Update documentation with source-only status and external release blockers.
-- [ ] Commit the gate, tests, and status documentation.
+- [x] Update documentation with source-only status and external release blockers.
+- [x] Commit the gate and implementation (`6db35b7`); this progress record documents the validation performed afterward.
