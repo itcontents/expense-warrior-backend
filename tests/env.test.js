@@ -68,8 +68,15 @@ test('PawaPay callback inbox is disabled by default and can be explicitly enable
   assert.equal(loadConfig({ ...values, PAWAPAY_CALLBACK_INBOX_ENABLED: 'true' }).pawaPay.callbackInboxEnabled, true)
   assert.equal(loadConfig(values).pawaPay.collectionsEnabled, false)
   assert.equal(loadConfig(values).pawaPay.payoutsEnabled, false)
-  assert.equal(loadConfig({ ...values, PAWAPAY_COLLECTIONS_ENABLED: 'true', PAWAPAY_PAYOUTS_ENABLED: 'true' }).pawaPay.collectionsEnabled, true)
-  assert.equal(loadConfig({ ...values, PAWAPAY_COLLECTIONS_ENABLED: 'true', PAWAPAY_PAYOUTS_ENABLED: 'true' }).pawaPay.payoutsEnabled, true)
+  assert.equal(loadConfig(values).pawaPay.signedRequestsOnlyConfirmed, false)
+  const confirmedFinancialOperations = {
+    ...values,
+    PAWAPAY_COLLECTIONS_ENABLED: 'true',
+    PAWAPAY_PAYOUTS_ENABLED: 'true',
+    PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED: 'true',
+  }
+  assert.equal(loadConfig(confirmedFinancialOperations).pawaPay.collectionsEnabled, true)
+  assert.equal(loadConfig(confirmedFinancialOperations).pawaPay.payoutsEnabled, true)
 })
 
 test('loadConfig requires Cloudinary credentials as a complete set', () => {
@@ -83,4 +90,28 @@ test('loadConfig requires Cloudinary credentials as a complete set', () => {
   const production = { ...values, NODE_ENV: 'production', DB_SSL_MODE: 'require', ITC_API_BASE_URL: 'https://itc.internal/api/v1', PAWAPAY_BASE_URL: 'https://api.pawapay.io', EXPENSE_WARRIOR_PAYOUT_DESTINATION_KEYS_JSON: '{"k1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}', EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID: 'k1' }
   delete production.CLOUDINARY_CLOUD_NAME
   assert.throws(() => loadConfig(production), (error) => error.code === 'CONFIG_INVALID' && error.details.includes('CLOUDINARY_CLOUD_NAME'))
+})
+
+test('financial PawaPay operations require explicit account-level signed-only confirmation', () => {
+  const values = {
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
+  }
+
+  assert.throws(
+    () => loadConfig({ ...values, PAWAPAY_COLLECTIONS_ENABLED: 'true' }),
+    (error) => error.code === 'CONFIG_INVALID' && error.details.includes('PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED')
+  )
+  assert.throws(
+    () => loadConfig({ ...values, PAWAPAY_PAYOUTS_ENABLED: 'true' }),
+    (error) => error.code === 'CONFIG_INVALID' && error.details.includes('PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED')
+  )
+
+  const config = loadConfig({
+    ...values,
+    PAWAPAY_COLLECTIONS_ENABLED: 'true',
+    PAWAPAY_PAYOUTS_ENABLED: 'true',
+    PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED: 'true',
+  })
+  assert.equal(config.pawaPay.signedRequestsOnlyConfirmed, true)
 })

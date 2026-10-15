@@ -27,6 +27,7 @@ const configSchema = Joi.object({
   PAWAPAY_DEPOSITS_CALLBACK_URL: Joi.string().uri({ scheme: ['https'] }).allow('').default(''),
   PAWAPAY_PAYOUTS_CALLBACK_URL: Joi.string().uri({ scheme: ['https'] }).allow('').default(''),
   PAWAPAY_SIGNATURE_ENABLED: Joi.boolean().truthy('true').falsy('false').default(true),
+  PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED: Joi.boolean().truthy('true').falsy('false').default(false),
   PAWAPAY_COLLECTIONS_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
   PAWAPAY_PAYOUTS_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
   PAWAPAY_CALLBACK_INBOX_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
@@ -59,6 +60,14 @@ function loadConfig(source = process.env) {
     const failure = new Error('Cloudinary attachment storage credentials must be configured together')
     failure.code = 'CONFIG_INVALID'
     failure.details = ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']
+    throw failure
+  }
+
+  if ((value.PAWAPAY_COLLECTIONS_ENABLED || value.PAWAPAY_PAYOUTS_ENABLED) &&
+      value.PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED !== true) {
+    const failure = new Error('PawaPay financial operations require confirmed signed-requests-only account configuration')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED']
     throw failure
   }
 
@@ -118,6 +127,7 @@ function loadConfig(source = process.env) {
       baseUrl: value.PAWAPAY_BASE_URL,
       apiToken: value.PAWAPAY_API_TOKEN,
       signatureEnabled: value.PAWAPAY_SIGNATURE_ENABLED,
+      signedRequestsOnlyConfirmed: value.PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED,
       collectionsEnabled: value.PAWAPAY_COLLECTIONS_ENABLED,
       payoutsEnabled: value.PAWAPAY_PAYOUTS_ENABLED,
       callbackInboxEnabled: value.PAWAPAY_CALLBACK_INBOX_ENABLED,
