@@ -1,13 +1,17 @@
-# Expense Warrior Backend
-
-This folder is the independently deployable Expense Warrior API and database service. It owns petty-cash workflows and payment-link state in its own PostgreSQL database. It must not connect directly to ITC's database. ITC integration uses authenticated, versioned APIs for identity and finance/ledger operations.
-
-## Current state and Phase 1
-
-The folder now contains a standalone Express API foundation with health/readiness routes, dedicated PostgreSQL configuration, a guarded explicit migration runner, and an ITC session client/middleware module. Request/category/approval routes and the ITC finance service contract are still in progress. The local `.env` and PawaPay signing keys are private and ignored by Git. No Expense Warrior or ITC database migration has been applied and no provider call has been made.
-
-ITC's existing finance routes use user JWT authentication; no reviewed inbound Expense Warrior finance service contract exists yet. ITC's PawaPay client has request-signing and callback-verification behavior but no wallet-balance operation. ITC's Cloudinary image asset module returns shared asset URLs and is not the private evidence service. See the architecture spec and integration contract requirements before implementing those later phases.
-
-See [PLAN.md](PLAN.md) for boundaries, data model, provider contract, security, and delivery phases. See the [Phase 1 implementation plan](../docs/superpowers/plans/2026-10-15-expense-warrior-phase-1.md) for the build sequence. The API listens on port `3100`. Startup requires configured dedicated database credentials; `/api/v1/ready` reports `503` if the configured database cannot be reached.
-
 # expense-warrior-backend
+
+Independently deployable Express API and PostgreSQL service for Expense Warrior. It owns request, payment-link, provider-attempt, and audit workflows in its own database. It integrates with ITC through service APIs and never connects directly to ITC's database.
+
+## Current state
+
+The API has health/readiness routes, validated configuration, a guarded explicit migration runner, ITC session validation, authenticated category/request submission/list/queue endpoints, and a private evidence upload/download path. Image evidence is limited to JPEG, PNG, or WebP, capped at 5 MB, stored under generated keys with restrictive permissions, and downloadable only by the requester, assigned manager, or admin. Expense Warrior migrations `0001`–`0009` have been applied to the dedicated local development database. Migration `0010` adds payout attempts and execution states but remains unapplied; no production migration has been run.
+
+Admin manager-assignment list/create/end endpoints and a team assignment screen are now present. ITC returns only active company-staff candidates; the API verifies both IDs through ITC before every assignment write and keeps effective-dated history. An assignment change affects new requests, while requests already submitted retain their snapshotted reviewer.
+
+Manager and admin rejection decisions are persisted with audit events; repeated identical rejections replay safely. Manager approval reserves funds through the signed ITC service. Admin rejection first releases that hold through ITC and remains retryable if the outcome is unknown. Final admin payout execution, same-ID provider recovery, exact ITC consume/release verification, admin-only bulk payout, and a recovery queue are implemented in source and covered by mocked tests. The payout feature flag is off by default; Expense Warrior migration `0010` and ITC finance migration `134` remain unapplied, and no payment or finance mutation has been attempted. An admin-only provider-balance endpoint reads Zambia PawaPay balances with a 30-second cache, explicit refresh, and stale-data indicator; it does not treat those balances as ITC ledger availability. Customer collection posting, including A/R settlement and customer account credits, awaits the approved ITC subledger contract. Request and wallet reports support CSV, XLSX, and PDF.
+
+The API listens on port `3100`. `/api/v1/ready` returns `503` until the configured Expense Warrior database is reachable. The owner reports ITC migrations `134` and `135` applied; the expected schema objects were found in `itc` and `local_staging`, but the read-only audit role could not verify both migration-ledger rows and checksums. See [the verification record](docs/itc-migration-134-135-verification-2026-10-15.md) before enabling ITC financial calls. The A/R account prerequisite is tracked separately in that record.
+
+The local `.env` and PawaPay private signing key are ignored by this repository. Request evidence is stored as Cloudinary `authenticated` image assets under an Expense Warrior namespace. The API stores opaque asset keys and proxies image bytes only after checking the caller's request access; do not make these assets public or return Cloudinary URLs. Configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` together. Production startup requires all three. The PawaPay signing public key may be committed separately if needed for callback verification; it does not replace signed-request account configuration.
+
+See [PLAN.md](PLAN.md) for the boundaries, category taxonomy, provider contracts, security requirements, reports, and delivery phases.

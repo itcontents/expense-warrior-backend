@@ -1,12 +1,16 @@
 # Credit invoices and A/R payment links — Expense Warrior V1
 
-**Status:** Conversational design sections approved; written specification awaiting owner review. **Date:** 2026-10-15. **Scope:** Add admin-created credit invoices and full-balance payment-link settlement across ITC and Expense Warrior.
+**Status:** Architecture approved by the owner; source implementation in progress with release prerequisites outstanding. **Date:** 2026-10-15. **Scope:** Add admin-created credit invoices and full-balance payment-link settlement across ITC and Expense Warrior.
 
 ## Context and decisions
 
-Expense Warrior already has a separate API and PostgreSQL database for requests, approvals, payment links, provider attempts, and workflow audit. ITC remains authoritative for customer identity, orders, inventory, chart of accounts, treasury, journals, and financial posting. The existing signed Expense Warrior finance contract deliberately fails closed for A/R because ITC has no eligible receivable source or collection reservation model.
+Expense Warrior has a separate API and PostgreSQL database for requests, approvals, payment links, provider attempts, and workflow audit. ITC remains authoritative for customer identity, orders, inventory, chart of accounts, treasury, journals, and financial posting. ITC A/R APIs and Expense Warrior integration are implemented in source; the required guarded migrations have not been applied, so A/R remains unavailable operationally until release verification.
 
 The owner approved an admin-only credit quote conversion, delivery on credit, A/R beginning at dispatch, delivered invoices only as A/R link targets, full-balance payment links that close after settlement, and credit-note handling for returns. Normal quote conversion and storefront orders remain full-payment-only and unchanged. Revenue, TOT, stock, and COGS continue to follow ITC's current dispatch policy. VAT-bearing credit orders remain blocked until VAT handling is defined.
+
+## Implementation status (2026-10-15)
+
+Source code for credit quote conversion, dispatch-time receivable recognition, ITC receivable listing and reservation APIs, and Expense Warrior A/R link collection is implemented and covered by focused tests. ITC migrations 136 and 137 remain unapplied; the A/R feature must stay disabled until the target database migration state and account 1100 readiness are verified and the guarded release is completed. Credit-note/return accounting is not implemented yet, so credit invoices are not ready for live use. No migration, provider call, credit dispatch, or financial posting was performed as part of this source implementation.
 
 ## Goals
 
@@ -75,10 +79,14 @@ The order must remain explicitly identifiable as credit throughout quote convers
 - On a verified A/R collection, debit the PawaPay clearing asset (1020 per the existing mapping) and credit Trade Receivables for the exact amount. Record the allocation, provider evidence and ITC operation in the same transaction as the journal and treasury ledger entry.
 - An approved return on an unpaid credit invoice creates one idempotent credit note. It reduces the receivable and reverses applicable revenue. If returned goods are accepted as saleable, restore inventory and reverse the matching COGS; otherwise do not restore saleable stock. Credit-note state, subledger events, inventory, journal and order return state are atomic and auditable.
 - Credit-note posting serializes on the same receivable lock as payment reservation/allocation. It cannot change an invoice while a provider result is unresolved; wait for a definitive terminal result or reconcile the attempt first.
-- A return after collection uses the existing refund workflow against the verified collection. It must not also create an A/R credit note for the same value. Refund failure/unknown-state handling follows the existing provider recovery policy.
+- A return after collection uses the existing approved-return and evidence controls, but payment-link collections are not canonical `payments` rows, so they cannot be forced through the storefront refund source lookup. Use a source-specific PawaPay refund attempt tied to the verified collection operation and its original deposit ID. The refund initiation uses a stable refund ID; `ACCEPTED` is pending, and only authoritative terminal success posts the refund accounting. Unknown outcomes remain pending and reconcile against that same refund ID. Never also create an A/R credit note for the same value.
 - Do not mutate posted invoices, receivable balances, journals, or inventory history in place. Corrections use linked, idempotent reversal/credit-note events.
 
+PawaPay V2 provides `POST /v2/refunds` with a `refundId`, original `depositId`, amount, currency, and client reference; the initiation API is idempotent by refund ID and returns asynchronous statuses. Final status is read through `GET /v2/refunds/{refundId}` or a verified callback. Expense Warrior now has the signed adapter methods for initiation and status lookup, but the return workflow, durable refund-attempt state, callback routing, and ITC refund posting remain to be implemented before this path is available. See the [official initiation](https://docs.pawapay.io/v2/api-reference/refunds/initiate-refund) and [status](https://docs.pawapay.io/v2/api-reference/refunds/check-refund-status) references.
+
 ## Payment page and PawaPay
+
+**Owner decision:** Approved. V1 uses the modular PawaPay adapter, merchant-enabled Zambia deposit networks, server-side phone validation, no PIN collection, signed financial requests, and provider polling before ITC posting. The user-facing receipt appears only after ITC confirms the posting.
 
 - The public page shows the fixed amount due and a safe invoice description, then offers only the configured Zambia DEPOSIT networks. In V1 the intended options are Airtel, MTN and Zamtel, but the merchant's PawaPay active configuration is authoritative for network, currency, transaction limits and authorization instructions.
 - Normalize the country-coded phone number server-side. PawaPay provider prediction may warn or ask the payer to confirm a network mismatch; it is not treated as authoritative.

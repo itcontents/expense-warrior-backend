@@ -1,0 +1,30 @@
+{
+  "name": "expense-warrior-api",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "db:migrate": "node src/db/migrate.js"
+  },
+  "dependencies": {
+    "cloudinary": "^2.11.0",
+    "dotenv": "^16.6.1",
+    "exceljs": "^4.4.0",
+    "express": "^5.3.0",
+    "joi": "^18.2.9",
+    "multer": "^2.4.0",
+    "pdfkit": "^0.20.2",
+    "pg": "^8.23.1"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
+  }
+}
