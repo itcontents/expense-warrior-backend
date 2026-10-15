@@ -19,6 +19,31 @@ test('loadConfig rejects missing dedicated database credentials', () => {
   )
 })
 
+test('loadConfig keeps migration credentials out of the runtime and rejects partial or shared identities', () => {
+  const values = {
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_PORT: '5432', DB_NAME: 'expense_warrior',
+    DB_USER: 'expense_warrior_app', DB_PASSWORD: 'runtime-password',
+    ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
+  }
+  assert.equal(loadConfig(values).migrationDatabase, null)
+
+  const migrationValues = {
+    ...values, DB_MIGRATION_USER: 'expense_warrior_migrator', DB_MIGRATION_PASSWORD: 'migration-password',
+  }
+  assert.throws(() => loadConfig(migrationValues),
+    (error) => error.code === 'CONFIG_INVALID' && error.details.includes('DB_MIGRATION_USER'))
+  const config = loadConfig(migrationValues, { includeMigrationCredentials: true })
+  assert.deepEqual(config.migrationDatabase, {
+    host: '127.0.0.1', port: 5432, database: 'expense_warrior',
+    user: 'expense_warrior_migrator', password: 'migration-password', ssl: false,
+  })
+
+  assert.throws(() => loadConfig({ ...values, DB_MIGRATION_USER: 'expense_warrior_migrator' }, { includeMigrationCredentials: true }),
+    (error) => error.code === 'CONFIG_INVALID' && error.details.includes('DB_MIGRATION_PASSWORD'))
+  assert.throws(() => loadConfig({ ...values, DB_MIGRATION_USER: values.DB_USER, DB_MIGRATION_PASSWORD: 'migration-password' }, { includeMigrationCredentials: true }),
+    (error) => error.code === 'CONFIG_INVALID' && error.details.includes('DB_MIGRATION_USER'))
+})
+
 test('loadConfig rejects production HTTP ITC integration URLs', () => {
   assert.throws(
     () => loadConfig({

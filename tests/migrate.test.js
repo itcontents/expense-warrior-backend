@@ -4,7 +4,7 @@ const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 
-const { collectMigrations, assertMigrationAllowed } = require('../src/db/migrate')
+const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig } = require('../src/db/migrate')
 
 test('collectMigrations_listsSqlFilesInStableOrderWithChecksums', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'expense-migrations-'))
@@ -26,4 +26,13 @@ test('assertMigrationAllowed_requiresExplicitConfirmation', () => {
     (error) => error.code === 'MIGRATION_CONFIRMATION_REQUIRED'
   )
   assert.doesNotThrow(() => assertMigrationAllowed({ CONFIRM_EXPENSE_WARRIOR_MIGRATIONS: 'APPLY' }))
+})
+
+test('getMigrationDatabaseConfig fails closed without a separate migration identity', () => {
+  assert.throws(
+    () => getMigrationDatabaseConfig({ migrationDatabase: null }),
+    (error) => error.code === 'MIGRATION_DATABASE_CREDENTIALS_REQUIRED'
+  )
+  const config = { migrationDatabase: { user: 'expense_warrior_migrator', database: 'expense_warrior' } }
+  assert.equal(getMigrationDatabaseConfig(config), config.migrationDatabase)
 })

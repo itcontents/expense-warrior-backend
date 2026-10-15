@@ -8,6 +8,8 @@ const configSchema = Joi.object({
   DB_NAME: Joi.string().trim().min(1).required(),
   DB_USER: Joi.string().trim().min(1).required(),
   DB_PASSWORD: Joi.string().min(1).required(),
+  DB_MIGRATION_USER: Joi.string().trim().allow('').default(''),
+  DB_MIGRATION_PASSWORD: Joi.string().allow('').default(''),
   DB_SSL_MODE: Joi.string().valid('disable', 'require', 'verify-full').default('disable'),
   ITC_API_BASE_URL: Joi.string().uri({ scheme: ['http', 'https'] }).required(),
   ITC_IDENTITY_TIMEOUT_MS: Joi.number().integer().min(500).max(15000).default(5000),
@@ -43,7 +45,7 @@ const configSchema = Joi.object({
   EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID: Joi.string().allow('').default(''),
 }).unknown(true)
 
-function loadConfig(source = process.env) {
+function loadConfig(source = process.env, { includeMigrationCredentials = false } = {}) {
   const { value, error } = configSchema.validate(source, {
     abortEarly: false,
     convert: true,
@@ -54,6 +56,25 @@ function loadConfig(source = process.env) {
     const failure = new Error('Expense Warrior environment configuration is invalid')
     failure.code = 'CONFIG_INVALID'
     failure.details = error.details.map((detail) => detail.path.join('.'))
+    throw failure
+  }
+
+  if (!includeMigrationCredentials && (value.DB_MIGRATION_USER || value.DB_MIGRATION_PASSWORD)) {
+    const failure = new Error('Migration database credentials are not available to the runtime application')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['DB_MIGRATION_USER']
+    throw failure
+  }
+  if (Boolean(value.DB_MIGRATION_USER) !== Boolean(value.DB_MIGRATION_PASSWORD)) {
+    const failure = new Error('Migration database credentials must be configured as a separate user and password pair')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = [value.DB_MIGRATION_USER ? 'DB_MIGRATION_PASSWORD' : 'DB_MIGRATION_USER']
+    throw failure
+  }
+  if (value.DB_MIGRATION_USER && value.DB_MIGRATION_USER === value.DB_USER) {
+    const failure = new Error('Migration database identity must differ from the runtime application identity')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['DB_MIGRATION_USER']
     throw failure
   }
 
@@ -126,6 +147,14 @@ function loadConfig(source = process.env) {
       password: value.DB_PASSWORD,
       ssl: value.DB_SSL_MODE === 'disable' ? false : { rejectUnauthorized: true },
     }),
+    migrationDatabase: includeMigrationCredentials && value.DB_MIGRATION_USER ? Object.freeze({
+      host: value.DB_HOST,
+      port: value.DB_PORT,
+      database: value.DB_NAME,
+      user: value.DB_MIGRATION_USER,
+      password: value.DB_MIGRATION_PASSWORD,
+      ssl: value.DB_SSL_MODE === 'disable' ? false : { rejectUnauthorized: true },
+    }) : null,
     itc: Object.freeze({
       baseUrl: value.ITC_API_BASE_URL.replace(/\/+$/, ''),
       identityTimeoutMs: value.ITC_IDENTITY_TIMEOUT_MS,

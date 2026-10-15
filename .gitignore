@@ -4,6 +4,7 @@ logs/
 *.log
 .env
 .env.*.local
+.env.migrations
 keys/*private*.pem
 var/
 dist/

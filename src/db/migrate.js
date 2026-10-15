@@ -1,4 +1,5 @@
 const fs = require('node:fs/promises')
+const fsSync = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 
@@ -11,6 +12,15 @@ function assertMigrationAllowed(env = process.env) {
     error.code = 'MIGRATION_CONFIRMATION_REQUIRED'
     throw error
   }
+}
+
+function getMigrationDatabaseConfig(config) {
+  if (!config?.migrationDatabase) {
+    const error = new Error('Separate DB_MIGRATION_USER and DB_MIGRATION_PASSWORD credentials are required')
+    error.code = 'MIGRATION_DATABASE_CREDENTIALS_REQUIRED'
+    throw error
+  }
+  return config.migrationDatabase
 }
 
 async function collectMigrations(directory = path.join(__dirname, 'migrations')) {
@@ -92,18 +102,32 @@ async function runMigrations({ pool, env = process.env, directory } = {}) {
 }
 
 if (require.main === module) {
-  require('dotenv').config()
+  const dotenv = require('dotenv')
+  dotenv.config()
   const { loadConfig } = require('../config/env')
   const { createPool } = require('./pool')
 
   let pool
-  runMigrations({ pool: (pool = createPool(loadConfig().database)) })
-    .then(({ applied }) => console.log(JSON.stringify({ event: 'migrations_applied', count: applied.length })))
-    .catch((error) => {
-      console.error(JSON.stringify({ event: 'migration_failed', code: error.code || 'MIGRATION_FAILED' }))
-      process.exitCode = 1
-    })
-    .finally(() => pool?.end())
+  try {
+    assertMigrationAllowed()
+    const migrationEnvPath = path.resolve(process.cwd(), '.env.migrations')
+    if (fsSync.existsSync(migrationEnvPath)) {
+      const migrationEnv = dotenv.parse(fsSync.readFileSync(migrationEnvPath))
+      process.env.DB_MIGRATION_USER = migrationEnv.DB_MIGRATION_USER || ''
+      process.env.DB_MIGRATION_PASSWORD = migrationEnv.DB_MIGRATION_PASSWORD || ''
+    }
+    pool = createPool(getMigrationDatabaseConfig(loadConfig(process.env, { includeMigrationCredentials: true })))
+    runMigrations({ pool })
+      .then(({ applied }) => console.log(JSON.stringify({ event: 'migrations_applied', count: applied.length })))
+      .catch((error) => {
+        console.error(JSON.stringify({ event: 'migration_failed', code: error.code || 'MIGRATION_FAILED' }))
+        process.exitCode = 1
+      })
+      .finally(() => pool?.end())
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'migration_failed', code: error.code || 'MIGRATION_FAILED' }))
+    process.exitCode = 1
+  }
 }
 
-module.exports = { assertMigrationAllowed, collectMigrations, runMigrations }
+module.exports = { assertMigrationAllowed, collectMigrations, getMigrationDatabaseConfig, runMigrations }
