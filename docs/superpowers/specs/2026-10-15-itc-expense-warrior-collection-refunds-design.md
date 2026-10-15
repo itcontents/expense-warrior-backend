@@ -1,6 +1,6 @@
 # ITC refunds for Expense Warrior A/R collections
 
-**Status:** approved direction, implementation not yet verified
+**Status:** approved direction; source implementation is gated and not database-verified
 
 ## Goal
 
@@ -61,6 +61,14 @@ The ITC provider integration must use the same PawaPay merchant account that acc
 - Keep Expense Warrior collection and payout flags off until ITC migration ledger/checksum evidence, account mappings, provider account identity, and signed-request-only configuration are verified.
 - Keep A/R collection disabled while account 1100 is inactive or non-postable.
 - Before enabling, run disposable-PostgreSQL transaction, concurrency, and replay checks plus an authorized sandbox refund test. Do not create a live transaction during development.
+
+## Implementation status (2026-10-15)
+
+- ITC source code now has a tagged A/R collection refund path through return approval, provider submission/reconciliation, treasury posting, and accounting replay validation.
+- `EXPENSE_WARRIOR_COLLECTION_REFUNDS_ENABLED` defaults to `false`; `.env.example` keeps it off.
+- Migration 139 remains source-only. It also defines the guarded collection-refund treasury writer; it has not been applied.
+- Focused node:test coverage passes for source selection, provider payload identity, release gating, settled return approval, migration shape, and replay evidence.
+- Disposable-PostgreSQL transaction/concurrency tests and an authorized PawaPay sandbox refund are still required before enabling the feature.
 
 ## Required verification
 
