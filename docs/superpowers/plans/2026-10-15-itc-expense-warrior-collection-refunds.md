@@ -48,11 +48,11 @@
 - Adds nullable `provider_account_id` and `provider_account_version` to old collection operations; new collection posting must supply both values from verified PawaPay initiation evidence.
 - Existing refunds default to `CANONICAL_PAYMENT`; source-specific required and forbidden columns are enforced by a validated check constraint.
 
-- [ ] Write a schema test proving legacy rows map to `CANONICAL_PAYMENT`, A/R refunds require exactly one collection operation, and mixed source identities are rejected.
-- [ ] Run `node --test tests/expenseWarriorCollectionRefundMigration.test.js`; confirm the new migration is absent and the test fails for the expected missing artifact.
+- [x] Write a source test pinning the legacy default, source-specific identifiers, and original PawaPay account/version fields.
+- [x] Run the migration test red first, then pass it after implementing the schema.
 - [x] Add additive DDL and guarded release registration without applying the migration.
-- [ ] Run the migration schema test and all migration-manifest tests.
-- [ ] Commit the migration source and registration as one unit.
+- [x] Run migration schema, release-artifact, and runner-safety tests.
+- [x] Commit the migration source and registration as one unit (`e688342`).
 
 ### Task 2: Resolve settled-credit return source and eligibility
 
@@ -60,10 +60,12 @@
 - Modify: `src/services/returnEligibilityPolicy.js`
 - Modify: `src/services/returnRefundWorkflowService.js`
 - Modify: `src/models/returns/ReturnRequestModel.js`
+- Modify: `src/services/expenseWarriorFinanceService.js` to persist only ITC-validated A/R collection account identity
+- Modify: `back/src/paymentLinks/publicPaymentService.js`, repository, provider registry, env, and migration to snapshot account identity on A/R attempts
 - Test: `tests/returnEligibilitySafety.test.js`
 - Test: `tests/returnReceivableGuard.test.js`
 - Test: `tests/creditReturnApprovalTransaction.test.js`
-- Test: `tests/creditReturnApprovalTransaction.test.js`
+- Test: `back/tests/publicPaymentService.test.js`, `back/tests/paymentLinkProviderAccountMigration.test.js`
 
 **Interfaces:**
 - `requestApprovedRefund({ returnRequestId, actorId, reason })` selects `CANONICAL_PAYMENT` or `EXPENSE_WARRIOR_COLLECTION` from authoritative ITC rows.
@@ -118,7 +120,6 @@
 ### Task 5: Gate and validate the complete source-only workflow
 
 **Files:**
-- Modify: `src/config/env.js`
 - Modify: `src/config/env.js`
 - Modify: `.env.example`
 - Modify: `docs/credit-return-settlement-and-refunds.md`
