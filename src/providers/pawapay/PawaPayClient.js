@@ -121,21 +121,30 @@ function depositOptionsFromConfiguration(configuration, { country = 'ZMB', curre
     if (!Array.isArray(providerConfig.currencies)) throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
     const currencyConfig = providerConfig.currencies.find((item) => item?.currency === currency)
     if (!currencyConfig) continue
-    if (!Array.isArray(currencyConfig.operationTypes)) throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
-    const operation = currencyConfig.operationTypes
-      .map((item) => item?.DEPOSIT || (item?.operationType === 'DEPOSIT' ? item : null))
-      .find(Boolean)
+    const operationTypes = currencyConfig.operationTypes
+    let operation
+    if (Array.isArray(operationTypes)) {
+      operation = operationTypes
+        .map((item) => item?.DEPOSIT || (item?.operationType === 'DEPOSIT' ? item : null))
+        .find(Boolean)
+    } else if (operationTypes && typeof operationTypes === 'object') {
+      operation = operationTypes.DEPOSIT || null
+    } else {
+      throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
+    }
     if (!operation || operation.status !== 'OPERATIONAL') continue
+    const minAmount = operation.minTransactionLimit ?? operation.minAmount
+    const maxAmount = operation.maxTransactionLimit ?? operation.maxAmount
     const validAmount = (value) => typeof value === 'string' && /^(?:0|[1-9]\d{0,11})(?:\.\d{1,2})?$/.test(value)
-    if (!validAmount(operation.minTransactionLimit) || !validAmount(operation.maxTransactionLimit) ||
+    if (!validAmount(minAmount) || !validAmount(maxAmount) ||
         !['NONE', 'TWO_PLACES'].includes(operation.decimalsInAmount) ||
         typeof operation.authType !== 'string' || !operation.authType.trim()) {
       throw new PawaPayError('PAWAPAY_RESPONSE_INVALID', { statusCode: 502 })
     }
     result.push({
       ...network,
-      min_amount: operation.minTransactionLimit,
-      max_amount: operation.maxTransactionLimit,
+      min_amount: minAmount,
+      max_amount: maxAmount,
       decimals_in_amount: operation.decimalsInAmount,
       auth_type: operation.authType,
       ...(typeof operation.pinPrompt === 'string' ? { pin_prompt: operation.pinPrompt } : {}),

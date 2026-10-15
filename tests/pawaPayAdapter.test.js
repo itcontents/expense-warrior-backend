@@ -196,6 +196,27 @@ test('deposit options come only from operational Zambia ZMW entries in active co
   }])
 })
 
+test('deposit options accept the operationTypes object and amount fields returned by PawaPay', async () => {
+  const configuration = {
+    countries: [{ country: 'ZMB', providers: [
+      { provider: 'AIRTEL_OAPI_ZMB', currencies: [{ currency: 'ZMW', operationTypes: { DEPOSIT: { status: 'OPERATIONAL', minAmount: '1', maxAmount: '20000', decimalsInAmount: 'TWO_PLACES', authType: 'PROVIDER_AUTH', pinPrompt: 'AUTOMATIC' } } }] },
+      { provider: 'MTN_MOMO_ZMB', currencies: [{ currency: 'ZMW', operationTypes: { DEPOSIT: { status: 'OPERATIONAL', minAmount: '1', maxAmount: '20000', decimalsInAmount: 'TWO_PLACES', authType: 'PROVIDER_AUTH', pinPrompt: 'AUTOMATIC' } } }] },
+      { provider: 'ZAMTEL_ZMB', currencies: [{ currency: 'ZMW', operationTypes: { DEPOSIT: { status: 'OPERATIONAL', minAmount: '1', maxAmount: '20000', decimalsInAmount: 'TWO_PLACES', authType: 'PROVIDER_AUTH', pinPrompt: 'AUTOMATIC' } } }] },
+    ] }],
+  }
+  const client = new PawaPayClient(config, {
+    fetchImpl: async () => ({ ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), text: async () => JSON.stringify(configuration) }),
+  })
+
+  const options = await client.getDepositNetworkOptions()
+
+  assert.deepEqual(options.map(({ code, min_amount, max_amount, pin_prompt }) => ({ code, min_amount, max_amount, pin_prompt })), [
+    { code: 'AIRTEL_OAPI_ZMB', min_amount: '1', max_amount: '20000', pin_prompt: 'AUTOMATIC' },
+    { code: 'MTN_MOMO_ZMB', min_amount: '1', max_amount: '20000', pin_prompt: 'AUTOMATIC' },
+    { code: 'ZAMTEL_ZMB', min_amount: '1', max_amount: '20000', pin_prompt: 'AUTOMATIC' },
+  ])
+})
+
 test('active configuration must be structurally valid before exposing deposit options', async () => {
   const client = new PawaPayClient(config, {
     now: () => now,
