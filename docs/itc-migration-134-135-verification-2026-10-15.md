@@ -39,3 +39,15 @@ The `local_staging` chart-of-accounts check was refreshed: account 1020 (`PawaPa
 In a later continuation, a read-only PostgreSQL transaction using the configured `itcstore_api` database identity checked only catalog visibility and migration metadata. All five expected tables were present in both `itc` and `local_staging`: `expense_warrior_finance_operations`, `expense_warrior_fund_holds`, `expense_warrior_service_nonces`, `expense_warrior_collection_operations`, and `expense_warrior_customer_credit_entries`. In `itc`, the exact 134/135 filenames returned no rows from `commerce_schema_migrations`. In `local_staging`, the same identity was denied `SELECT` on that ledger; the earlier read-only audit-reader check returned no matching rows there. No DML or migration command was executed.
 
 This reconfirms the schema objects but does not verify that the guarded release ledger contains either migration with its source checksum. Keep finance calls disabled until a least-privilege audit identity can verify the exact ledger entries in both databases and the separate account/provider readiness checks pass. The API role result is supplemental schema evidence, not a substitute for the audit-reader release check.
+
+## Read-only recheck — 16 October 2026
+
+Using `scripts/codex_db.js` again with the asserted `shopit_accounting_audit` read-only login:
+
+- Both `itc` and `local_staging` expose the migration ledger and all five expected Expense Warrior finance tables in `public` through PostgreSQL catalog inspection.
+- In `local_staging`, selecting the exact migration 134/135 ledger rows succeeds but returns no rows. Therefore the expected tables exist, but the guarded migration ledger does not record these source migration filenames there.
+- In `itc`, the audit login receives `permission denied for schema public` when selecting the ledger. A separate catalog-only query can see the ledger and expected tables, but cannot verify their recorded checksums or applied state.
+- The checked-out migration source SHA-256 values still match the release manifest: `134_expense_warrior_treasury_holds.sql` is `7fca968c587ad8524ce12e261dd16725ad28f2d96ba2a2b4d44f6d4225622a2a`; `135_expense_warrior_collections.sql` is `2759465bcbaf5246fdd8f4408eabb59d23b5d91a572eeee4f0f00ad9d8be003e`.
+- The current `local_staging` COA still has 1020 (`PawaPay Clearing – ZMW`) active/postable and 2020 (`Customer Credit Payable`) active/postable. Account 1100 (`Trade Receivables`) remains inactive/non-postable, so A/R collection is not ready even apart from migrations 136–137.
+
+No DDL/DML, migrations, provider calls, or financial postings were performed. The next verification prerequisite is a least-privilege reader that can inspect `commerce_schema_migrations` in both targets. Until then, do not infer successful application from table presence or the owner's migration report, and keep the finance feature gates off.
