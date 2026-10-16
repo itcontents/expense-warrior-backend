@@ -68,7 +68,7 @@ test('managerAssignments_rejectsNonAdminBeforeDatabaseTransaction', async () => 
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, {
       method: 'POST',
-      headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ staff_customer_id: '45a79d36-1c70-4622-84d2-145a26f288d3', manager_customer_id: '8c1e1275-0a6d-4e0e-9176-3f6d46ab9986' }),
     })
     assert.equal(response.status, 403)
@@ -91,7 +91,7 @@ test('managerAssignments_refusesInactiveOrNonCompanyDirectoryIdsBeforeDatabaseWr
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, {
       method: 'POST',
-      headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ staff_customer_id: '8c1e1275-0a6d-4e0e-9176-3f6d46ab9986', manager_customer_id: 'c8da2d30-9805-4f51-9f6c-5bca3ff77a01' }),
     })
     assert.equal(response.status, 422)

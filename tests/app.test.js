@@ -55,13 +55,94 @@ test('publicPaymentRoutesReportCollectionsDisabledWithoutStartingAttempts', asyn
 
     const attempt = await fetch(`${baseUrl}/api/v1/expense-warrior/public/payment-links/public-token/attempts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': '00000000-0000-4000-8000-000000000001' },
+      headers: { origin: 'https://untrusted.example', 'Content-Type': 'application/json', 'Idempotency-Key': '00000000-0000-4000-8000-000000000001' },
       body: JSON.stringify({ network_code: 'MTN_MOMO_ZMB', phone_number: '260957909783' }),
     })
     assert.equal(attempt.status, 503)
     assert.deepEqual(await attempt.json(), {
       error: { code: 'COLLECTIONS_DISABLED', message: 'Payments are temporarily unavailable' },
     })
+  })
+})
+
+test('cookieAuthenticatedMutationsRejectUntrustedOriginsBeforeITCIdentityLookup', async () => {
+  let identityLookups = 0
+  const app = createApp({
+    pool: {
+      query: async () => ({ rows: [] }),
+      connect: async () => { throw new Error('invalid request bodies must not access PostgreSQL') },
+    },
+    identityClient: { getSession: async () => { identityLookups += 1; return { customerId: 'admin-id', role: 'admin', active: true } } },
+    browserOrigins: ['http://127.0.0.1:5175'],
+    nodeEnv: 'test',
+  })
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests`, {
+      method: 'POST',
+      headers: {
+        cookie: 'itc_backoffice_access=valid',
+        origin: 'https://untrusted.itcontents.com',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    })
+
+    assert.equal(response.status, 403)
+    assert.equal(identityLookups, 0)
+    assert.deepEqual(await response.json(), {
+      error: { code: 'CSRF_ORIGIN_DENIED', message: 'Request origin validation failed' },
+    })
+  })
+})
+
+test('cookieAuthenticatedMutationsRequireAnExactTrustedOrigin', async () => {
+  let identityLookups = 0
+  const app = createApp({
+    pool: {
+      query: async () => ({ rows: [] }),
+      connect: async () => { throw new Error('invalid request bodies must not access PostgreSQL') },
+    },
+    identityClient: { getSession: async () => { identityLookups += 1; return { customerId: 'admin-id', role: 'admin', active: true } } },
+    browserOrigins: ['http://127.0.0.1:5175'],
+    nodeEnv: 'test',
+  })
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests`, {
+      method: 'POST',
+      headers: { cookie: 'itc_backoffice_access=valid', 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    assert.equal(response.status, 403)
+    assert.equal(identityLookups, 0)
+  })
+})
+
+test('cookieAuthenticatedMutationsAcceptTheConfiguredBrowserOrigin', async () => {
+  let identityLookups = 0
+  const app = createApp({
+    pool: {
+      query: async () => ({ rows: [] }),
+      connect: async () => { throw new Error('invalid request bodies must not access PostgreSQL') },
+    },
+    identityClient: { getSession: async () => { identityLookups += 1; return { customerId: 'admin-id', role: 'admin', active: true } } },
+    browserOrigins: ['http://127.0.0.1:5175'],
+    nodeEnv: 'test',
+  })
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests`, {
+      method: 'POST',
+      headers: {
+        cookie: 'itc_backoffice_access=valid',
+        origin: 'http://127.0.0.1:5175',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    })
+    assert.equal(response.status, 400)
+    assert.equal(identityLookups, 1)
   })
 })
 

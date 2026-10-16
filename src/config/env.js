@@ -1,4 +1,5 @@
 const Joi = require('joi')
+const { parseAllowedBrowserOrigins } = require('../auth/cookieCsrfGuard')
 
 const configSchema = Joi.object({
   NODE_ENV: Joi.string().valid('development', 'test', 'production').default('development'),
@@ -43,6 +44,7 @@ const configSchema = Joi.object({
   PAWAPAY_FINAL_STATUS_POLL_INTERVAL_MS: Joi.number().integer().min(1000).max(15000).default(5000),
   EXPENSE_WARRIOR_PAYOUT_DESTINATION_KEYS_JSON: Joi.string().allow('').default(''),
   EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID: Joi.string().allow('').default(''),
+  EXPENSE_WARRIOR_BROWSER_ORIGINS: Joi.string().trim().allow('').default(''),
 }).unknown(true)
 
 function loadConfig(source = process.env, { includeMigrationCredentials = false } = {}) {
@@ -102,6 +104,20 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
     throw failure
   }
 
+  const browserOrigins = parseAllowedBrowserOrigins(value.EXPENSE_WARRIOR_BROWSER_ORIGINS)
+  if (value.NODE_ENV === 'production' && browserOrigins.length === 0) {
+    const failure = new Error('Production browser mutations require an explicit trusted origin allowlist')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['EXPENSE_WARRIOR_BROWSER_ORIGINS']
+    throw failure
+  }
+  if (value.NODE_ENV === 'production' && browserOrigins.some((origin) => new URL(origin).protocol !== 'https:')) {
+    const failure = new Error('Production browser origins must use HTTPS')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['EXPENSE_WARRIOR_BROWSER_ORIGINS']
+    throw failure
+  }
+
   if (value.NODE_ENV === 'production') {
     const integrationUrl = new URL(value.ITC_API_BASE_URL)
     if (integrationUrl.protocol !== 'https:') {
@@ -139,6 +155,7 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
   return Object.freeze({
     nodeEnv: value.NODE_ENV,
     port: value.PORT,
+    browserOrigins: Object.freeze(browserOrigins),
     database: Object.freeze({
       host: value.DB_HOST,
       port: value.DB_PORT,

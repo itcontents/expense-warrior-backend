@@ -38,7 +38,9 @@ function startServer() {
   const app = createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault,
     callbackInboxEnabled: config.pawaPay.callbackInboxEnabled,
     collectionPaymentsEnabled: config.pawaPay.collectionsEnabled,
-    staffPayoutsEnabled: config.pawaPay.payoutsEnabled })
+    staffPayoutsEnabled: config.pawaPay.payoutsEnabled,
+    browserOrigins: config.browserOrigins,
+    nodeEnv: config.nodeEnv })
   const server = app.listen(config.port, '0.0.0.0')
 
   const shutdown = (signal) => {

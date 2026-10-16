@@ -1,12 +1,14 @@
 const express = require('express')
 const { randomUUID } = require('node:crypto')
+const { createCookieCsrfGuard, parseAllowedBrowserOrigins } = require('./auth/cookieCsrfGuard')
 
 function validRequestId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value)
 }
 
 function createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault,
-  callbackInboxEnabled = false, callbackInboxRepository = null, collectionPaymentsEnabled = false, staffPayoutsEnabled = false }) {
+  callbackInboxEnabled = false, callbackInboxRepository = null, collectionPaymentsEnabled = false, staffPayoutsEnabled = false,
+  browserOrigins = null, nodeEnv = process.env.NODE_ENV || 'development' }) {
   if (!pool || typeof pool.query !== 'function') {
     throw new TypeError('A PostgreSQL-compatible pool is required')
   }
@@ -15,6 +17,9 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
   if (paymentProviders) app.locals.paymentProviders = paymentProviders
   if (itcFinanceClient) app.locals.itcFinanceClient = itcFinanceClient
   app.disable('x-powered-by')
+  const allowedBrowserOrigins = browserOrigins === null
+    ? parseAllowedBrowserOrigins(process.env.EXPENSE_WARRIOR_BROWSER_ORIGINS || '')
+    : browserOrigins
   app.use((req, res, next) => {
     const supplied = req.get('X-Request-Id')
     req.requestId = validRequestId(supplied) ? supplied : randomUUID()
@@ -23,6 +28,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
     res.set('Referrer-Policy', 'no-referrer')
     next()
   })
+  app.use(createCookieCsrfGuard({ allowedOrigins: allowedBrowserOrigins, nodeEnv }))
 
   // Provider callbacks sign raw HTTP bodies. These bounded raw parsers must run
   // before express.json consumes or transforms those bodies.

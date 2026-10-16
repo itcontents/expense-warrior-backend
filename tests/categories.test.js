@@ -98,7 +98,7 @@ test('accounting category map administration is admin-only and validates against
 
     const saved = await fetch(`${baseUrl}/api/v1/expense-warrior/admin/categories/550e8400-e29b-41d4-a716-446655440000/accounting-map`, {
       method: 'PUT',
-      headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ itc_expense_category_code: 'consumables' }),
     })
     assert.equal(saved.status, 200)
@@ -106,7 +106,7 @@ test('accounting category map administration is admin-only and validates against
 
     const invalid = await fetch(`${baseUrl}/api/v1/expense-warrior/admin/categories/550e8400-e29b-41d4-a716-446655440000/accounting-map`, {
       method: 'PUT',
-      headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ itc_expense_category_code: 'inventory' }),
     })
     assert.equal(invalid.status, 422)

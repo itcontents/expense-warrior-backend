@@ -75,6 +75,7 @@ test('loadConfig exposes PawaPay config and rejects the sandbox API in productio
     CLOUDINARY_API_SECRET: 'test-secret',
     EXPENSE_WARRIOR_PAYOUT_DESTINATION_KEYS_JSON: '{"k1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}',
     EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID: 'k1',
+    EXPENSE_WARRIOR_BROWSER_ORIGINS: 'https://expense.itcontents.com',
   }
   assert.throws(() => loadConfig(values), (error) => error.code === 'CONFIG_INVALID' && error.details.includes('PAWAPAY_BASE_URL'))
 
@@ -82,6 +83,23 @@ test('loadConfig exposes PawaPay config and rejects the sandbox API in productio
   assert.equal(config.pawaPay.baseUrl, 'https://api.pawapay.io')
   assert.equal(config.pawaPay.signatureEnabled, true)
   assert.equal(config.pawaPay.signaturePrivateKeyPath, './keys/pawapay-signing-private.pem')
+})
+
+test('loadConfig requires explicit HTTPS browser origins in production and rejects non-origin URLs', () => {
+  const values = {
+    NODE_ENV: 'production', DB_HOST: 'db.internal', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    DB_SSL_MODE: 'require', ITC_API_BASE_URL: 'https://itc.internal/api/v1', PAWAPAY_BASE_URL: 'https://api.pawapay.io',
+    EXPENSE_WARRIOR_PAYOUT_DESTINATION_KEYS_JSON: '{"k1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}',
+    EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID: 'k1',
+    CLOUDINARY_CLOUD_NAME: 'test-cloud', CLOUDINARY_API_KEY: 'test-key', CLOUDINARY_API_SECRET: 'test-secret',
+  }
+  assert.throws(() => loadConfig(values), (error) => error.code === 'CONFIG_INVALID' && error.details.includes('EXPENSE_WARRIOR_BROWSER_ORIGINS'))
+  assert.throws(() => loadConfig({ ...values, EXPENSE_WARRIOR_BROWSER_ORIGINS: 'http://expense.itcontents.com' }),
+    (error) => error.code === 'CONFIG_INVALID' && error.details.includes('EXPENSE_WARRIOR_BROWSER_ORIGINS'))
+  assert.throws(() => loadConfig({ ...values, EXPENSE_WARRIOR_BROWSER_ORIGINS: 'https://expense.itcontents.com/admin' }),
+    (error) => error.code === 'CONFIG_INVALID' && error.details.includes('EXPENSE_WARRIOR_BROWSER_ORIGINS'))
+  const config = loadConfig({ ...values, EXPENSE_WARRIOR_BROWSER_ORIGINS: 'https://expense.itcontents.com,https://admin.itcontents.com' })
+  assert.deepEqual(config.browserOrigins, ['https://expense.itcontents.com', 'https://admin.itcontents.com'])
 })
 
 test('PawaPay callback inbox is disabled by default and can be explicitly enabled', () => {
@@ -125,7 +143,7 @@ test('loadConfig requires Cloudinary credentials as a complete set', () => {
   assert.throws(() => loadConfig({ ...values, CLOUDINARY_CLOUD_NAME: 'cloud' }), (error) => error.code === 'CONFIG_INVALID')
   const config = loadConfig({ ...values, CLOUDINARY_CLOUD_NAME: 'cloud', CLOUDINARY_API_KEY: 'key', CLOUDINARY_API_SECRET: 'secret' })
   assert.deepEqual(config.attachments, { cloudName: 'cloud', apiKey: 'key', apiSecret: 'secret' })
-  const production = { ...values, NODE_ENV: 'production', DB_SSL_MODE: 'require', ITC_API_BASE_URL: 'https://itc.internal/api/v1', PAWAPAY_BASE_URL: 'https://api.pawapay.io', EXPENSE_WARRIOR_PAYOUT_DESTINATION_KEYS_JSON: '{"k1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}', EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID: 'k1' }
+  const production = { ...values, NODE_ENV: 'production', DB_SSL_MODE: 'require', ITC_API_BASE_URL: 'https://itc.internal/api/v1', PAWAPAY_BASE_URL: 'https://api.pawapay.io', EXPENSE_WARRIOR_PAYOUT_DESTINATION_KEYS_JSON: '{"k1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}', EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID: 'k1', EXPENSE_WARRIOR_BROWSER_ORIGINS: 'https://expense.itcontents.com' }
   delete production.CLOUDINARY_CLOUD_NAME
   assert.throws(() => loadConfig(production), (error) => error.code === 'CONFIG_INVALID' && error.details.includes('CLOUDINARY_CLOUD_NAME'))
 })
