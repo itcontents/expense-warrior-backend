@@ -44,7 +44,7 @@ function createPaymentLinkRepository({ pool } = {}) {
         const link = linkResult.rows[0]
         if (!link) throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
         const priorResult = await client.query(`
-          SELECT attempt_id, payment_link_id, request_fingerprint, provider_transaction_id, network_code, network_label,
+          SELECT attempt_id, payment_link_id, request_fingerprint, provider_code, provider_transaction_id, network_code, network_label,
                  payer_phone, amount::text, currency, state, provider_status, created_at, updated_at,
                  provider_account_id, provider_account_version
             FROM payment_link_attempts
@@ -64,7 +64,7 @@ function createPaymentLinkRepository({ pool } = {}) {
             provider_code, provider_transaction_id, network_code, network_label, payer_phone,
             amount, currency, state, provider_account_id, provider_account_version
           ) VALUES ($1,$2,$3,$4,$5,$1,$6,$7,$8,$9,$10,'SUBMITTING',$11,$12)
-          RETURNING attempt_id, payment_link_id, provider_transaction_id, network_code, network_label,
+          RETURNING attempt_id, payment_link_id, provider_code, provider_transaction_id, network_code, network_label,
                     payer_phone, amount::text, currency, state, provider_status, created_at, updated_at,
                     provider_account_id, provider_account_version
         `, [input.attemptId, link.payment_link_id, input.idempotencyKey, input.requestFingerprint,
@@ -107,14 +107,14 @@ function createPaymentLinkRepository({ pool } = {}) {
                provider_evidence_digest = COALESCE($7, provider_evidence_digest),
                updated_at = transaction_timestamp()
          WHERE attempt_id = $1 AND state IN ('SUBMITTING', 'PENDING', 'UNKNOWN', 'VERIFIED_PENDING_LEDGER')
-        RETURNING attempt_id, provider_transaction_id, network_code, payer_phone,
+        RETURNING attempt_id, provider_code, provider_transaction_id, network_code, payer_phone,
                   amount::text, currency, state, provider_status, provider_reference,
                   created_at, updated_at, verified_at, ledger_operation_id, provider_evidence_digest
                   , provider_account_id, provider_account_version
       `, [attemptId, state, providerStatus, providerReference, errorCode, verified, evidenceDigest])
       if (!result.rows[0]) {
         const current = await pool.query(`
-          SELECT attempt_id, provider_transaction_id, network_code, payer_phone,
+          SELECT attempt_id, provider_code, provider_transaction_id, network_code, payer_phone,
                  amount::text, currency, state, provider_status, created_at, updated_at,
                  verified_at, ledger_operation_id, provider_evidence_digest
                  , provider_account_id, provider_account_version
@@ -133,12 +133,12 @@ function createPaymentLinkRepository({ pool } = {}) {
           UPDATE payment_link_attempts
              SET state = 'SUCCEEDED', ledger_operation_id = $2, updated_at = transaction_timestamp()
            WHERE attempt_id = $1 AND state = 'VERIFIED_PENDING_LEDGER'
-          RETURNING attempt_id, payment_link_id, provider_transaction_id, network_code, payer_phone,
+          RETURNING attempt_id, payment_link_id, provider_code, provider_transaction_id, network_code, payer_phone,
                     amount::text, currency, state, provider_status, provider_reference,
                     created_at, updated_at, verified_at, ledger_operation_id, provider_evidence_digest
         `, [attemptId, operationId])
         const attempt = result.rows[0] || (await client.query(`
-          SELECT attempt_id, payment_link_id, provider_transaction_id, network_code, payer_phone,
+          SELECT attempt_id, payment_link_id, provider_code, provider_transaction_id, network_code, payer_phone,
                  amount::text, currency, state, provider_status, provider_reference,
                  created_at, updated_at, verified_at, ledger_operation_id, provider_evidence_digest
             FROM payment_link_attempts WHERE attempt_id = $1 FOR UPDATE

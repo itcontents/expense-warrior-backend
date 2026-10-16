@@ -83,11 +83,13 @@ test('payment-link repository persists idempotent links and verified collections
     const firstAttempt = await repository.createAttempt(attemptInput)
     assert.equal(firstAttempt.replayed, false)
     assert.equal(firstAttempt.attempt.state, 'SUBMITTING')
+    assert.equal(firstAttempt.attempt.provider_code, attemptInput.providerCode)
     assert.equal(firstAttempt.attempt.provider_account_version, 4)
 
     const replayedAttempt = await repository.createAttempt({ ...attemptInput, attemptId: randomUUID() })
     assert.equal(replayedAttempt.replayed, true)
     assert.equal(replayedAttempt.attempt.attempt_id, attemptInput.attemptId)
+    assert.equal(replayedAttempt.attempt.provider_code, attemptInput.providerCode)
     await assert.rejects(
       repository.createAttempt({ ...attemptInput, requestFingerprint: 'e'.repeat(64) }),
       (error) => error.code === 'IDEMPOTENCY_CONFLICT',
@@ -101,17 +103,26 @@ test('payment-link repository persists idempotent links and verified collections
       evidenceDigest: 'f'.repeat(64),
     })
     assert.equal(verified.state, 'VERIFIED_PENDING_LEDGER')
+    assert.equal(verified.provider_code, attemptInput.providerCode)
     const succeeded = await repository.markAttemptSucceeded(attemptInput.attemptId, randomUUID())
     assert.equal(succeeded.state, 'SUCCEEDED')
+    assert.equal(succeeded.provider_code, attemptInput.providerCode)
 
+    const addonAccountId = randomUUID()
     const distinctPayment = await repository.createAttempt({
       ...attemptInput,
       attemptId: randomUUID(),
       idempotencyKey: randomUUID(),
       requestFingerprint: '1'.repeat(64),
       phoneNumber: '260977654321',
+      providerCode: 'airtel_direct',
+      providerAccountId: addonAccountId,
+      providerAccountVersion: 5,
     })
     assert.equal(distinctPayment.replayed, false, 'a reusable revenue link accepts a new independent payment attempt')
+    assert.equal(distinctPayment.attempt.provider_code, 'airtel_direct')
+    assert.equal(distinctPayment.attempt.network_code, attemptInput.networkCode,
+      'different providers may safely use the same network code')
 
     const customerId = randomUUID()
     const receivableId = randomUUID()
@@ -148,13 +159,17 @@ test('payment-link repository persists idempotent links and verified collections
     assert.equal(attempts.rows[0].count, 3, 'attempt replay must not insert another provider attempt')
 
     const persisted = await pool.query(`
-      SELECT state, provider_account_id, provider_account_version, ledger_operation_id
-        FROM payment_link_attempts WHERE attempt_id = $1
-    `, [attemptInput.attemptId])
-    assert.equal(persisted.rows[0].state, 'SUCCEEDED')
-    assert.equal(persisted.rows[0].provider_account_id, attemptInput.providerAccountId)
-    assert.equal(persisted.rows[0].provider_account_version, 4)
-    assert.ok(persisted.rows[0].ledger_operation_id)
+      SELECT state, provider_code, network_code, provider_account_id, provider_account_version, ledger_operation_id
+        FROM payment_link_attempts WHERE attempt_id = ANY($1::uuid[])
+    `, [[attemptInput.attemptId, distinctPayment.attempt.attempt_id]])
+    const persistedByProvider = new Map(persisted.rows.map((row) => [row.provider_code, row]))
+    assert.equal(persistedByProvider.get('pawapay').state, 'SUCCEEDED')
+    assert.equal(persistedByProvider.get('pawapay').provider_account_id, attemptInput.providerAccountId)
+    assert.equal(persistedByProvider.get('pawapay').provider_account_version, 4)
+    assert.ok(persistedByProvider.get('pawapay').ledger_operation_id)
+    assert.equal(persistedByProvider.get('airtel_direct').network_code, attemptInput.networkCode)
+    assert.equal(persistedByProvider.get('airtel_direct').provider_account_id, addonAccountId)
+    assert.equal(persistedByProvider.get('airtel_direct').provider_account_version, 5)
     const activeRevenueLink = await repository.getPublicLink(linkInput.tokenHash)
     assert.equal(activeRevenueLink.status, 'ACTIVE', 'revenue payment links remain reusable after a successful collection')
   } finally {
