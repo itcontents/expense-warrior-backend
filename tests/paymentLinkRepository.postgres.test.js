@@ -6,6 +6,7 @@ const { Pool } = require('pg')
 require('dotenv').config()
 const { loadConfig } = require('../src/config/env')
 const { createPaymentLinkRepository } = require('../src/paymentLinks/paymentLinkRepository')
+const { createTemporaryTables } = require('./helpers/postgresTestSchema')
 
 const enabled = process.env.EW_RUN_POSTGRES_TESTS === '1'
 const TABLES = Object.freeze([
@@ -29,21 +30,7 @@ test('payment-link repository persists idempotent links and verified collections
       assert.equal(identity.rows[0]?.role, 'expense_warrior_app', 'test must use the restricted runtime account')
       assert.equal(identity.rows[0]?.superuser, false, 'test refuses a superuser database identity')
 
-      for (const table of TABLES) {
-        await client.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING ALL) ON COMMIT PRESERVE ROWS`)
-      }
-      // Migration 0013 is deliberately unapplied. Add its exact shape only to this
-      // session's temporary table so the source-only repository contract is testable.
-      await client.query(`
-        ALTER TABLE pg_temp.payment_link_attempts
-          ADD COLUMN provider_account_id uuid,
-          ADD COLUMN provider_account_version integer,
-          ADD CONSTRAINT payment_link_attempts_provider_account_pair_check
-            CHECK (
-              (provider_account_id IS NULL AND provider_account_version IS NULL)
-              OR (provider_account_id IS NOT NULL AND provider_account_version > 0)
-            )
-      `)
+      await createTemporaryTables(client, TABLES)
       const resolution = await client.query(`
         SELECT to_regclass('payment_links')::text AS links,
                to_regclass('payment_link_attempts')::text AS attempts,

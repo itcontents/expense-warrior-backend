@@ -7,6 +7,7 @@ require('dotenv').config()
 const { loadConfig } = require('../src/config/env')
 const { createRequestRepository } = require('../src/requests/requestRepository')
 const { createStaffPayoutRepository } = require('../src/payouts/staffPayoutRepository')
+const { createTemporaryTables } = require('./helpers/postgresTestSchema')
 
 const enabled = process.env.EW_RUN_POSTGRES_TESTS === '1'
 const TABLES = Object.freeze([
@@ -34,9 +35,7 @@ test('request approval and payout preparation commit staged decisions atomically
       assert.equal(identity.rows[0]?.role, 'expense_warrior_app', 'test must use the restricted runtime account')
       assert.equal(identity.rows[0]?.superuser, false, 'test refuses a superuser database identity')
 
-      for (const table of TABLES) {
-        await client.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING ALL) ON COMMIT PRESERVE ROWS`)
-      }
+      await createTemporaryTables(client, TABLES)
       const resolution = await client.query(`
         SELECT to_regclass('expense_requests')::text AS requests,
                to_regclass('request_payout_attempts')::text AS payouts,
