@@ -38,7 +38,8 @@ const request = {
   },
 }
 
-function makeHarness({ prepared = {}, preparedSequence = [], initiation, status, consume, release, reserve } = {}) {
+function makeHarness({ prepared = {}, preparedSequence = [], initiation, status, consume, release, reserve,
+  providerRegistry = null, payoutDestination = destination } = {}) {
   const calls = []
   const repository = {
     prepareFinalApproval: async (input) => {
@@ -49,7 +50,7 @@ function makeHarness({ prepared = {}, preparedSequence = [], initiation, status,
     setAdminReservationAccountingSnapshot: async (input) => { calls.push(['setAdminReservationAccountingSnapshot', input]); return request },
     markAdminReservationFailure: async (input) => { calls.push(['markAdminReservationFailure', input]); return request },
     preparePayoutReconciliation: async (input) => { calls.push(['preparePayoutReconciliation', input]); return { request, payout: request.payout } },
-    revealPayoutDestination: async () => destination,
+    revealPayoutDestination: async () => payoutDestination,
     recordInitiation: async (input) => { calls.push(['recordInitiation', input]); return request.payout },
     markPending: async (input) => { calls.push(['markPending', input]); return request.payout },
     markUnknown: async (input) => { calls.push(['markUnknown', input]); return request.payout },
@@ -91,7 +92,7 @@ function makeHarness({ prepared = {}, preparedSequence = [], initiation, status,
   }
   const service = createStaffPayoutService({
     repository,
-    providerRegistry: {
+    providerRegistry: providerRegistry || {
       get: () => provider,
       getNetworks: (providerCode) => [{ provider_code: providerCode, code: 'ZAMTEL_ZMB', label: 'Zamtel' }],
       getAccountIdentity: () => ({ provider_account_id: providerAccountId, provider_account_version: providerAccountVersion }),
@@ -156,6 +157,56 @@ test('a confirmed matching PawaPay payout consumes its exact ITC hold before rep
   assert.equal(consumeCall[2].provider_transaction_id, providerTransactionId)
   assert.equal(consumeCall[2].expense_category_code, 'office_supplies')
   assert.equal(consumeCall[3], `ew-consume-${crypto.createHash('sha256').update(providerTransactionId).digest('hex')}`)
+})
+
+test('final approval and reconciliation select the snapshotted add-on and account version', async () => {
+  const addonAccountId = '91000000-0000-4000-8000-000000000010'
+  const addonAccountVersion = 3
+  const addonDestination = {
+    provider_code: 'airtel_direct', network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783',
+  }
+  const addonPayout = {
+    ...request.payout,
+    provider_code: 'airtel_direct',
+    provider_account_id: addonAccountId,
+    provider_account_version: addonAccountVersion,
+    network_code: addonDestination.network_code,
+  }
+  const addonRequest = { ...request, payout: addonPayout }
+  const adapterSelections = []
+  const initiationCalls = []
+  const addonAdapter = {
+    initiatePayout: async (input) => {
+      initiationCalls.push(input)
+      return { transaction_id: payoutId, outcome: 'ACCEPTED', provider_status: 'ACCEPTED' }
+    },
+    getPayoutStatus: async () => null,
+  }
+  const { service } = makeHarness({
+    prepared: { request: addonRequest, payout: addonPayout, shouldInitiate: true },
+    payoutDestination: addonDestination,
+    providerRegistry: {
+      get: () => addonAdapter,
+      getNetworks: () => [{ code: addonDestination.network_code, label: 'Airtel Money' }],
+      getAccountIdentity: () => ({ provider_account_id: addonAccountId, provider_account_version: addonAccountVersion }),
+      getForOperation: (...selection) => {
+        adapterSelections.push(selection)
+        return addonAdapter
+      },
+    },
+  })
+
+  const result = await service.finalApprove(actor, requestId)
+
+  assert.equal(result.pending, true)
+  const expectedSelection = [
+    'airtel_direct', 'payout',
+    { provider_account_id: addonAccountId, provider_account_version: addonAccountVersion },
+  ]
+  assert.deepEqual(adapterSelections, [expectedSelection, expectedSelection])
+  assert.equal(initiationCalls.length, 1)
+  assert.equal(initiationCalls[0].network_code, 'AIRTEL_OAPI_ZMB')
+  assert.equal(initiationCalls[0].phone_number, '260957909783')
 })
 
 test('a payout with mismatched destination or amount is held for reconciliation and never consumed', async () => {
