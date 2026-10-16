@@ -198,6 +198,29 @@ test('recovery after an unknown pre-acceptance result reuses the same PawaPay pa
   assert.equal(calls.filter(([name]) => name === 'initiatePayout').length, 1)
 })
 
+test('a rejected payout records a validated provider failure code in the hold release operation', async () => {
+  const { service, calls } = makeHarness({ initiation: {
+    transaction_id: payoutId, outcome: 'REJECTED', provider_status: 'REJECTED', rejection_code: 'INSUFFICIENT_BALANCE',
+  } })
+
+  const result = await service.finalApprove(actor, requestId)
+
+  assert.equal(result.request.status, 'PAYOUT_FAILED')
+  assert.equal(calls.find(([name]) => name === 'prepareRelease')[1].reasonCode, 'PAWAPAY_INSUFFICIENT_BALANCE')
+  assert.equal(calls.find(([name]) => name === 'recordInitiation')[1].errorCode, 'PAWAPAY_INSUFFICIENT_BALANCE')
+})
+
+test('a malformed provider failure code falls back to a fixed safe rejection code', async () => {
+  const { service, calls } = makeHarness({ initiation: {
+    transaction_id: payoutId, outcome: 'REJECTED', provider_status: 'REJECTED', rejection_code: 'BAD CODE; SECRET',
+  } })
+
+  await service.finalApprove(actor, requestId)
+
+  assert.equal(calls.find(([name]) => name === 'prepareRelease')[1].reasonCode, 'PROVIDER_REJECTED')
+  assert.equal(calls.find(([name]) => name === 'recordInitiation')[1].errorCode, 'PROVIDER_REJECTED')
+})
+
 test('a definitive PawaPay failure releases the reserved ITC hold before marking the payout failed', async () => {
   const { service, calls } = makeHarness({ status: completedStatus({ status: 'FAILED' }) })
   const result = await service.finalApprove(actor, requestId)

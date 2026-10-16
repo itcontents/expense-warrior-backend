@@ -110,6 +110,54 @@ test('payout calls are signed and use the recipient payload contract', async () 
   verifyRequestSignature(call)
 })
 
+test('payout initiation preserves the documented failureReason failureCode without exposing provider text', async () => {
+  const registry = createProviderRegistry({
+    pawaPayConfig: config,
+    dependencies: { pawapay: { now: () => now, fetchImpl: async () => ({
+      ok: true, status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => JSON.stringify({
+        payoutId: '22222222-2222-4222-8222-222222222222',
+        status: 'REJECTED',
+        failureReason: { failureCode: 'INSUFFICIENT_BALANCE', failureMessage: 'Private provider details' },
+      }),
+    }) } },
+  })
+  const provider = registry.get('pawapay')
+  const result = await provider.initiatePayout({
+    transaction_id: '22222222-2222-4222-8222-222222222222',
+    country: 'ZMB', currency: 'ZMW', amount: '25.00', phone_number: '260953456700',
+    network_code: 'ZAMTEL_ZMB', client_reference: 'EW-REQ-1', customer_message: 'Expense request',
+  })
+
+  assert.equal(result.outcome, 'REJECTED')
+  assert.equal(result.rejection_code, 'INSUFFICIENT_BALANCE')
+  assert.equal(JSON.stringify(result).includes('Private provider details'), false)
+})
+
+test('payout initiation drops malformed provider failure codes', async () => {
+  const registry = createProviderRegistry({
+    pawaPayConfig: config,
+    dependencies: { pawapay: { now: () => now, fetchImpl: async () => ({
+      ok: true, status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => JSON.stringify({
+        payoutId: '22222222-2222-4222-8222-222222222222',
+        status: 'REJECTED',
+        failureReason: { failureCode: 'BAD CODE', failureMessage: 'untrusted provider content' },
+      }),
+    }) } },
+  })
+  const result = await registry.get('pawapay').initiatePayout({
+    transaction_id: '22222222-2222-4222-8222-222222222222',
+    country: 'ZMB', currency: 'ZMW', amount: '25.00', phone_number: '260953456700',
+    network_code: 'ZAMTEL_ZMB', client_reference: 'EW-REQ-1', customer_message: 'Expense request',
+  })
+
+  assert.equal(result.rejection_code, null)
+  assert.equal(JSON.stringify(result).includes('untrusted provider content'), false)
+})
+
 test('refund initiation is signed, tied to the original deposit, and safely queryable', async () => {
   const calls = []
   const client = new PawaPayClient(config, {

@@ -35,6 +35,15 @@ function evidenceDigest(result) {
   return crypto.createHash('sha256').update(canonical).digest('hex')
 }
 
+function providerRejectionCode(payout, response) {
+  const providerCode = String(payout?.provider_code || 'pawapay')
+  const failureCode = String(response?.rejection_code || '')
+  if (!/^[a-z][a-z0-9_]{1,31}$/.test(providerCode) || !/^[A-Z0-9_]{1,64}$/.test(failureCode)) {
+    return 'PROVIDER_REJECTED'
+  }
+  return `${providerCode.toUpperCase()}_${failureCode}`
+}
+
 function getProviderForOperation(providerRegistry, providerCode, operation, accountIdentity = null) {
   if (typeof providerRegistry?.getForOperation === 'function') return providerRegistry.getForOperation(providerCode, operation, accountIdentity)
   const provider = providerRegistry?.get?.(providerCode)
@@ -137,8 +146,9 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
         return markUnknown(actor, payout, 'PROVIDER_RESPONSE_INVALID', requestIdForAudit)
       }
       if (response.outcome === 'REJECTED') {
-        await repository.recordInitiation({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus: response.provider_status || 'REJECTED', errorCode: 'PROVIDER_REJECTED', requestIdForAudit })
-        return releaseFailedPayout(actor, request, payout, 'PROVIDER_REJECTED', requestIdForAudit)
+        const reasonCode = providerRejectionCode(payout, response)
+        await repository.recordInitiation({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus: response.provider_status || 'REJECTED', errorCode: reasonCode, requestIdForAudit })
+        return releaseFailedPayout(actor, request, payout, reasonCode, requestIdForAudit)
       }
       await repository.markPending({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus: response.provider_status || response.outcome, requestIdForAudit })
       return { request: { request_id: request.request_id, status: 'PAYOUT_PENDING' }, pending: true }
@@ -397,8 +407,9 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
           return { request: { request_id: requestId, status: 'PAYOUT_PENDING' }, pending: true, errorCode: 'PROVIDER_RESPONSE_INVALID' }
         }
         if (response.outcome === 'REJECTED') {
-          await repository.recordInitiation({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, providerStatus: response.provider_status || 'REJECTED', errorCode: 'PROVIDER_REJECTED', requestIdForAudit })
-          return releaseFailedPayout(actor, request, payout, 'PROVIDER_REJECTED', requestIdForAudit)
+          const reasonCode = providerRejectionCode(payout, response)
+          await repository.recordInitiation({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, providerStatus: response.provider_status || 'REJECTED', errorCode: reasonCode, requestIdForAudit })
+          return releaseFailedPayout(actor, request, payout, reasonCode, requestIdForAudit)
         }
         await repository.recordInitiation({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, providerStatus: response.provider_status || response.outcome, requestIdForAudit })
       } catch (_error) {

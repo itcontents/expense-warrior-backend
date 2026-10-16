@@ -25,6 +25,11 @@ function normalizeOutcome(status, kind = 'status') {
     (['ACCEPTED', 'SUBMITTED', 'INITIATED', 'PROCESSING', 'PENDING'].includes(status) ? 'PENDING' : 'UNKNOWN')
 }
 
+function providerFailureCode(record) {
+  const code = record?.failureReason?.failureCode || record?.rejectionReason?.rejectionCode
+  return typeof code === 'string' && /^[A-Z0-9_]{1,80}$/.test(code) ? code : null
+}
+
 function normalizePawaPayResult(operation, payload, kind = 'status') {
   const record = resultRecord(payload)
   if (!record) return null
@@ -54,7 +59,7 @@ function normalizePawaPayResult(operation, payload, kind = 'status') {
     transaction_id: transactionId,
     outcome: normalizeOutcome(record.status, kind),
     provider_status: record.status || null,
-    rejection_code: record.rejectionReason?.rejectionCode || null,
+    rejection_code: providerFailureCode(record),
     evidence,
   }
 }
