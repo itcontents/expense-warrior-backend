@@ -62,7 +62,7 @@ test('provider balance snapshot history is bounded and admin-only', async (t) =>
   const response = await fetch(`${url}/wallet/provider-balance/history?limit=25`, { headers: { cookie: 'itc_backoffice_access=admin-session' } })
   assert.equal(response.status, 200)
   assert.equal(response.headers.get('cache-control'), 'private, no-store')
-  assert.deepEqual(received, { limit: 25 })
+  assert.deepEqual(received, { limit: 25, providerCode: 'pawapay' })
   assert.deepEqual((await response.json()).data.snapshots, [{ snapshot_batch_id: 'batch-1' }])
 })
 

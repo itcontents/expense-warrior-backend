@@ -6,7 +6,8 @@ const { PayoutDestinationError } = require('./payoutDestinationService')
 const { PayoutDestinationRepositoryError } = require('./payoutDestinationRepository')
 
 const assignmentSchema = Joi.object({
-  network_code: Joi.string().valid('AIRTEL_OAPI_ZMB', 'MTN_MOMO_ZMB', 'ZAMTEL_ZMB').required(),
+  provider_code: Joi.string().pattern(/^[a-z][a-z0-9_]{1,31}$/).default('pawapay'),
+  network_code: Joi.string().pattern(/^[A-Z][A-Z0-9_]{1,39}$/).required(),
   phone_number: Joi.string().trim().min(9).max(20).required(),
 }).unknown(false)
 
@@ -26,6 +27,9 @@ function createPayoutDestinationRouter({ identityClient, destinationService }) {
   router.get('/admin/payout-destinations', requireSession, requireAdmin, async (_req, res) => {
     try { return res.status(200).json({ data: { items: await destinationService.list(_req.actor) } }) } catch (error) { return respondError(res, error) }
   })
+  router.get('/admin/payout-destinations/networks', requireSession, requireAdmin, async (_req, res) => {
+    try { return res.status(200).json({ data: { items: await destinationService.listNetworks(_req.actor) } }) } catch (error) { return respondError(res, error) }
+  })
   router.put('/admin/payout-destinations/:staff_customer_id', requireSession, requireAdmin, async (req, res) => {
     const { value, error } = assignmentSchema.validate(req.body, { abortEarly: false, convert: true })
     const staffIdValidation = Joi.string().guid().validate(req.params.staff_customer_id)
@@ -37,7 +41,7 @@ function createPayoutDestinationRouter({ identityClient, destinationService }) {
       if (!eligible.some((person) => person.customer_id.toLowerCase() === req.params.staff_customer_id.toLowerCase())) {
         return res.status(422).json({ error: { code: 'STAFF_NOT_ELIGIBLE', message: 'Choose an active company staff account' } })
       }
-      const result = await destinationService.assign(req.actor, req.params.staff_customer_id, value.network_code, value.phone_number)
+      const result = await destinationService.assign(req.actor, req.params.staff_customer_id, value.network_code, value.phone_number, value.provider_code)
       return res.status(200).json({ data: result })
     } catch (cause) { return respondError(res, cause) }
   })

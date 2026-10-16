@@ -13,10 +13,23 @@ const digest = 'a'.repeat(64)
 function createService({ inserted = true } = {}) {
   let stored
   const service = createCallbackInboxService({
-    verifier: { verifyCallback: async ({ requestContext }) => {
-      assert.ok(Buffer.isBuffer(requestContext.rawBody))
-      return true
-    } },
+    providerCode: 'pawapay',
+    provider: {
+      verifyCallback: async ({ requestContext }) => {
+        assert.ok(Buffer.isBuffer(requestContext.rawBody))
+        return true
+      },
+      normalizeCallback: ({ transactionType, rawBody, headers }) => {
+        const body = JSON.parse(rawBody.toString('utf8'))
+        return {
+          transaction_id: body[transactionType === 'deposit' ? 'depositId' : 'payoutId'],
+          provider_status: body.status,
+          provider_reference: null,
+          signature_key_id: 'merchant-key',
+          signature_date: headers['signature-date'],
+        }
+      },
+    },
     repository: { append: async (event) => { stored = event; return { inserted, eventId: inserted ? 'event-1' : null } } },
     now: () => new Date('2026-10-15T12:00:00.000Z'),
   })
@@ -38,7 +51,8 @@ test('callback intake verifies raw body before parsing and persists only sanitiz
   }, requestContext: { rawBody } })
   assert.equal(result.duplicate, false)
   assert.deepEqual(harness.stored, {
-    provider_code: 'pawapay', transaction_type: 'deposit', transaction_id: transactionId,
+    provider_code: 'pawapay', provider_account_id: null, provider_account_version: null,
+    transaction_type: 'deposit', transaction_id: transactionId,
     provider_status: 'COMPLETED', provider_reference: null,
     payload_sha256: require('node:crypto').createHash('sha256').update(rawBody).digest('hex'),
     signature_key_id: 'merchant-key', signature_date: '2026-10-15T12:00:00.000Z',
@@ -50,7 +64,7 @@ test('callback intake verifies raw body before parsing and persists only sanitiz
 test('callback intake rejects invalid signature before JSON parsing and storage', async () => {
   let writes = 0
   const service = createCallbackInboxService({
-    verifier: { verifyCallback: async () => { throw new Error('signature rejected') } },
+    provider: { verifyCallback: async () => { throw new Error('signature rejected') }, normalizeCallback: () => assert.fail('untrusted body must not be parsed') },
     repository: { append: async () => { writes += 1 } },
   })
   await assert.rejects(service.receive({ transactionType: 'deposit', rawBody: Buffer.from('{not json'), headers: {}, requestContext: {} }), CallbackInboxError)
@@ -88,13 +102,15 @@ test('callback repository appends with exact-payload deduplication and never upd
     params = values
     return { rows: [] }
   } } })
-  const result = await repository.append({ provider_code: 'pawapay', transaction_type: 'deposit', transaction_id: transactionId,
+  const result = await repository.append({ provider_code: 'pawapay', provider_account_id: null, provider_account_version: null,
+    transaction_type: 'deposit', transaction_id: transactionId,
     provider_status: 'COMPLETED', provider_reference: null, payload_sha256: digest, signature_key_id: null,
     signature_date: '2026-10-15T12:00:00.000Z' })
   assert.deepEqual(result, { inserted: false, eventId: null })
   assert.match(statement, /ON CONFLICT \(provider_code, payload_sha256\) DO NOTHING/)
   assert.doesNotMatch(statement, /UPDATE\s+provider_callback_inbox/i)
   assert.ok(!params.includes(JSON.stringify(payload)))
+  assert.equal(params.length, 10)
 })
 
 test('callback endpoint is disabled by default and when enabled it is mounted before JSON parser', async () => {
@@ -104,6 +120,10 @@ test('callback endpoint is disabled by default and when enabled it is mounted be
     verificationCount += 1
     assert.ok(Buffer.isBuffer(requestContext.rawBody))
     return true
+  }, normalizeCallback: ({ transactionType, rawBody, headers }) => {
+    const parsed = JSON.parse(rawBody.toString('utf8'))
+    return { transaction_id: parsed[transactionType === 'deposit' ? 'depositId' : 'payoutId'], provider_status: parsed.status,
+      signature_key_id: 'merchant-key', signature_date: headers['signature-date'] }
   } }) }
   const app = createApp({ pool: { query: async () => ({ rows: [] }) }, paymentProviders,
     callbackInboxRepository: { append: async (event) => { stored = event; return { inserted: true, eventId: 'event-1' } } } })
@@ -139,7 +159,7 @@ test('enabling callback intake fails startup without a usable verifier', () => {
 test('callback endpoint rejects requests over 64 KiB before verification', async () => {
   let verificationCount = 0
   const app = createApp({ pool: { query: async () => ({ rows: [] }) }, callbackInboxEnabled: true,
-    paymentProviders: { get: () => ({ verifyCallback: async () => { verificationCount += 1 } }) },
+    paymentProviders: { get: () => ({ verifyCallback: async () => { verificationCount += 1 }, normalizeCallback: () => ({}) }) },
     callbackInboxRepository: { append: async () => ({ inserted: true }) } })
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/providers/pawapay/callbacks/deposit`, {

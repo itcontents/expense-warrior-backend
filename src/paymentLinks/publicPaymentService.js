@@ -40,19 +40,13 @@ function toPublicAttempt(attempt) {
     status: state,
     amount: attempt.amount,
     currency: attempt.currency,
+    provider_code: attempt.provider_code,
     network_code: attempt.network_code,
     payer_phone_masked: `••••${String(attempt.payer_phone || '').slice(-4)}`,
     created_at: new Date(attempt.created_at).toISOString(),
     updated_at: new Date(attempt.updated_at).toISOString(),
     receipt_available: attempt.state === 'SUCCEEDED' && Boolean(attempt.ledger_operation_id),
   }
-}
-
-function readProviderTransaction(payload) {
-  if (Array.isArray(payload)) return payload[0] || null
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
-  if (payload.status === 'FOUND') return payload.data && typeof payload.data === 'object' ? payload.data : null
-  return payload
 }
 
 function amountToMinor(value) {
@@ -81,19 +75,20 @@ async function getDepositNetworks(providerRegistry) {
   return networks
 }
 
-async function getUniqueNetwork(providerRegistry, networkCode, link) {
+async function getUniqueNetwork(providerRegistry, providerCode, networkCode, link) {
   if (link.currency !== 'ZMW') return null
   let availableNetworks
   try { availableNetworks = await getDepositNetworks(providerRegistry) }
   catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE', 503) }
   const matching = availableNetworks
-    .filter((network) => network.code === networkCode && supportsPublicPhonePrompt(network) && providerAmount(link.amount, network) !== null)
+    .filter((network) => network.code === networkCode && (!providerCode || network.provider_code === providerCode) &&
+      supportsPublicPhonePrompt(network) && providerAmount(link.amount, network) !== null)
   if (matching.length > 1) throw new PaymentLinkError('PAYMENT_NETWORK_ROUTE_AMBIGUOUS', 503)
   return matching[0] || null
 }
 
-function getProviderForOperation(providerRegistry, providerCode, operation) {
-  if (typeof providerRegistry?.getForOperation === 'function') return providerRegistry.getForOperation(providerCode, operation)
+function getProviderForOperation(providerRegistry, providerCode, operation, accountIdentity = null) {
+  if (typeof providerRegistry?.getForOperation === 'function') return providerRegistry.getForOperation(providerCode, operation, accountIdentity)
   const provider = providerRegistry?.get?.(providerCode)
   const methods = { deposit: ['initiateDeposit', 'getDepositStatus'] }[operation] || []
   return provider && methods.every((method) => typeof provider[method] === 'function') ? provider : null
@@ -109,17 +104,16 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       let availableNetworks
       try { availableNetworks = await getDepositNetworks(providerRegistry) }
       catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE', 503) }
-      const networkCounts = new Map()
-      for (const { code } of availableNetworks) networkCounts.set(code, (networkCounts.get(code) || 0) + 1)
       return {
         payment_link_id: link.payment_link_id,
         description: link.description,
         amount: link.amount,
         currency: link.currency,
         available_networks: availableNetworks
-          .filter((network) => link.currency === 'ZMW' && networkCounts.get(network.code) === 1 && supportsPublicPhonePrompt(network) && providerAmount(link.amount, network) !== null)
-          .map(({ code, label, min_amount, max_amount, decimals_in_amount, auth_type, pin_prompt }) => ({
-            code, label, min_amount, max_amount, decimals_in_amount, auth_type,
+          .filter((network) => link.currency === 'ZMW' && supportsPublicPhonePrompt(network) && providerAmount(link.amount, network) !== null)
+          .map(({ provider_code, provider_label, code, label, min_amount, max_amount, decimals_in_amount, auth_type, pin_prompt }) => ({
+            provider_code, code, label, min_amount, max_amount, decimals_in_amount, auth_type,
+            ...(provider_label ? { provider_label } : {}),
             ...(pin_prompt ? { pin_prompt } : {}),
           })),
       }
@@ -128,9 +122,12 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
     async startAttempt(token, input, idempotencyKey) {
       if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{40,128}$/.test(token) ||
           !input || typeof input !== 'object' || !PHONE_ZM.test(String(input.phone_number || '')) ||
-          !UUID.test(String(idempotencyKey || ''))) throw new PaymentLinkError('INVALID_PAYMENT_ATTEMPT', 400)
+          !UUID.test(String(idempotencyKey || '')) ||
+          (input.provider_code !== undefined && !/^[a-z][a-z0-9_]{1,31}$/.test(String(input.provider_code)))) throw new PaymentLinkError('INVALID_PAYMENT_ATTEMPT', 400)
       const tokenHash = sha256(token)
-      const requestFingerprint = sha256(JSON.stringify([input.network_code, input.phone_number]))
+      const requestFingerprint = sha256(JSON.stringify(input.provider_code
+        ? [input.provider_code, input.network_code, input.phone_number]
+        : [input.network_code, input.phone_number]))
       if (typeof repository.getAttemptByIdempotency === 'function') {
         const existing = await repository.getAttemptByIdempotency(tokenHash, idempotencyKey)
         if (existing) {
@@ -143,25 +140,19 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       }
       const link = await repository.getPublicLink(tokenHash)
       if (!link) throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
-      const selectedNetwork = await getUniqueNetwork(providerRegistry, input.network_code, link)
+      const selectedNetwork = await getUniqueNetwork(providerRegistry, input.provider_code || null, input.network_code, link)
       if (!selectedNetwork) throw new PaymentLinkError('INVALID_PAYMENT_ATTEMPT', 400)
       const attemptId = idFactory()
       if (!UUID.test(String(attemptId || ''))) throw new PaymentLinkError('PAYMENT_ATTEMPT_ID_INVALID')
       const providerCode = selectedNetwork.provider_code
+      let providerAccountIdentity = null
+      try { providerAccountIdentity = providerRegistry?.getAccountIdentity?.(providerCode) || null }
+      catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_CONFIGURATION_UNAVAILABLE', 503) }
+      if (!providerAccountIdentity) throw new PaymentLinkError('PAYMENT_PROVIDER_CONFIGURATION_UNAVAILABLE', 503)
       let provider
-      try { provider = getProviderForOperation(providerRegistry, providerCode, 'deposit') }
+      try { provider = getProviderForOperation(providerRegistry, providerCode, 'deposit', providerAccountIdentity) }
       catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE') }
       if (!provider) throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE')
-
-      let providerAccountIdentity = null
-      if (isReceivableLink(link)) {
-        try {
-          providerAccountIdentity = providerRegistry?.getAccountIdentity?.(providerCode) || null
-        } catch (_error) {
-          throw new PaymentLinkError('PAYMENT_PROVIDER_CONFIGURATION_UNAVAILABLE', 503)
-        }
-        if (!providerAccountIdentity) throw new PaymentLinkError('PAYMENT_PROVIDER_CONFIGURATION_UNAVAILABLE', 503)
-      }
 
       const prepared = await repository.createAttempt({
         tokenHash,
@@ -170,6 +161,7 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         attemptId,
         providerCode,
         networkCode: input.network_code,
+        networkLabel: selectedNetwork.label,
         phoneNumber: input.phone_number,
         providerAccountId: providerAccountIdentity?.provider_account_id || null,
         providerAccountVersion: providerAccountIdentity?.provider_account_version || null,
@@ -197,38 +189,42 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       let updated
       try {
         const response = await provider.initiateDeposit({
-          depositId: prepared.attempt.provider_transaction_id,
+          transaction_id: prepared.attempt.provider_transaction_id,
+          country: 'ZMB',
+          currency: prepared.attempt.currency,
           amount: providerAmount(prepared.attempt.amount, selectedNetwork),
-          phoneNumber: prepared.attempt.payer_phone,
-          provider: prepared.attempt.network_code,
-          clientReferenceId: `EW-${prepared.attempt.attempt_id}`,
-          customerMessage: 'EW petty cash',
+          phone_number: prepared.attempt.payer_phone,
+          network_code: prepared.attempt.network_code,
+          client_reference: `EW-${prepared.attempt.attempt_id}`,
+          customer_message: 'EW petty cash',
         })
-        if (response?.depositId !== prepared.attempt.provider_transaction_id ||
-            !['ACCEPTED', 'DUPLICATE_IGNORED', 'REJECTED'].includes(response?.status)) {
+        if (response?.transaction_id !== prepared.attempt.provider_transaction_id ||
+            !['ACCEPTED', 'DUPLICATE', 'REJECTED'].includes(response?.outcome)) {
           updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-            state: 'UNKNOWN', providerStatus: response?.status || 'INVALID_RESPONSE', errorCode: 'PROVIDER_RESPONSE_INVALID',
+            state: 'UNKNOWN', providerStatus: response?.provider_status || response?.outcome || 'INVALID_RESPONSE', errorCode: 'PROVIDER_RESPONSE_INVALID',
           })
         } else {
-          if (response.status === 'REJECTED' && isReceivableLink(prepared.link)) {
+          if (response.outcome === 'REJECTED' && isReceivableLink(prepared.link)) {
             try {
-              await releaseFailedArReservation(itcFinanceClient, { ...prepared.attempt, ...prepared.link }, response)
+              await releaseFailedArReservation(itcFinanceClient, { ...prepared.attempt, ...prepared.link }, {
+                outcome: response.outcome, providerStatus: response.provider_status, rejectionCode: response.rejection_code,
+              })
               updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-                state: 'FAILED', providerStatus: response.status,
-                providerReference: response.rejectionReason?.rejectionCode || null, errorCode: 'PROVIDER_REJECTED',
+                state: 'FAILED', providerStatus: response.provider_status || response.outcome,
+                providerReference: response.rejection_code || null, errorCode: 'PROVIDER_REJECTED',
               })
             } catch (_releaseError) {
               updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-                state: 'UNKNOWN', providerStatus: response.status,
-                providerReference: response.rejectionReason?.rejectionCode || null, errorCode: 'RESERVATION_RELEASE_PENDING',
+                state: 'UNKNOWN', providerStatus: response.provider_status || response.outcome,
+                providerReference: response.rejection_code || null, errorCode: 'RESERVATION_RELEASE_PENDING',
               })
             }
           } else {
             updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-              state: response.status === 'REJECTED' ? 'FAILED' : 'PENDING',
-              providerStatus: response.status,
-              providerReference: response.rejectionReason?.rejectionCode || null,
-              errorCode: response.status === 'REJECTED' ? 'PROVIDER_REJECTED' : null,
+              state: response.outcome === 'REJECTED' ? 'FAILED' : 'PENDING',
+              providerStatus: response.provider_status || response.outcome,
+              providerReference: response.rejection_code || null,
+              errorCode: response.outcome === 'REJECTED' ? 'PROVIDER_REJECTED' : null,
             })
           }
         }
@@ -236,8 +232,7 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         if (isReceivableLink(prepared.link) && !error?.outcomeUnknown) {
           try {
             await releaseFailedArReservation(itcFinanceClient, { ...prepared.attempt, ...prepared.link }, {
-              depositId: prepared.attempt.provider_transaction_id,
-              status: 'FAILED',
+              outcome: 'FAILED',
               providerStatus: error?.providerStatus || null,
             })
             updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
@@ -273,25 +268,31 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       }
 
       let provider
-      try { provider = getProviderForOperation(providerRegistry, attempt.provider_code || 'pawapay', 'deposit') }
+      const accountIdentity = attempt.provider_account_id && attempt.provider_account_version
+        ? { provider_account_id: attempt.provider_account_id, provider_account_version: attempt.provider_account_version }
+        : null
+      try { provider = getProviderForOperation(providerRegistry, attempt.provider_code || 'pawapay', 'deposit', accountIdentity) }
       catch (_error) { throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE') }
       if (!provider) throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE')
       let providerTransaction
-      try { providerTransaction = readProviderTransaction(await provider.getDepositStatus(attempt.provider_transaction_id)) }
+      try { providerTransaction = await provider.getDepositStatus(attempt.provider_transaction_id) }
       catch (_error) { return toPublicAttempt(attempt) }
       if (!providerTransaction) return toPublicAttempt(attempt)
 
-      const transactionId = providerTransaction.depositId
-      const status = providerTransaction.status
+      const transactionId = providerTransaction.transaction_id
+      const status = providerTransaction.provider_status || providerTransaction.outcome
       if (transactionId !== attempt.provider_transaction_id) {
         if (attempt.state === 'VERIFIED_PENDING_LEDGER') return toPublicAttempt(attempt)
         return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, { state: 'UNKNOWN', providerStatus: status || 'MISMATCH', errorCode: 'PROVIDER_EVIDENCE_MISMATCH' }))
       }
-      if (status === 'FAILED' || status === 'CANCELED') {
+      if (['FAILED', 'CANCELLED'].includes(providerTransaction.outcome)) {
         if (attempt.state === 'VERIFIED_PENDING_LEDGER') return toPublicAttempt(attempt)
         if (isReceivableLink(attempt)) {
           try {
-            await releaseFailedArReservation(itcFinanceClient, attempt, providerTransaction)
+            await releaseFailedArReservation(itcFinanceClient, attempt, {
+              outcome: providerTransaction.outcome, providerStatus: status,
+              rejectionCode: providerTransaction.rejection_code,
+            })
             return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, { state: 'FAILED', providerStatus: status, errorCode: status }))
           } catch (_releaseError) {
             return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, { state: 'UNKNOWN', providerStatus: status, errorCode: 'RESERVATION_RELEASE_PENDING' }))
@@ -299,20 +300,23 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         }
         return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, { state: 'FAILED', providerStatus: status, errorCode: status }))
       }
-      if (status !== 'COMPLETED') {
+      if (providerTransaction.outcome !== 'SUCCEEDED') {
         if (attempt.state === 'VERIFIED_PENDING_LEDGER') return toPublicAttempt(attempt)
-        return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, { state: 'PENDING', providerStatus: status || 'UNKNOWN' }))
+        return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, {
+          state: providerTransaction.outcome === 'UNKNOWN' ? 'UNKNOWN' : 'PENDING', providerStatus: status || 'UNKNOWN',
+        }))
       }
 
-      const payerPhone = providerTransaction.payer?.accountDetails?.phoneNumber || providerTransaction.payer?.address?.value
-      const network = providerTransaction.correspondent || providerTransaction.payer?.accountDetails?.provider
-      const requestedAmount = providerTransaction.requestedAmount || providerTransaction.amount
-      const receivedAmount = providerTransaction.depositedAmount || providerTransaction.amount
-      const evidenceMatches = providerTransaction.country === 'ZMB' &&
+      const evidence = providerTransaction.evidence
+      const payerPhone = evidence?.phone_number
+      const network = evidence?.network_code
+      const requestedAmount = evidence?.requested_amount || evidence?.amount
+      const receivedAmount = evidence?.received_amount || evidence?.amount
+      const evidenceMatches = evidence && evidence.country === 'ZMB' &&
         transactionId === attempt.provider_transaction_id &&
         amountToMinor(requestedAmount) === amountToMinor(attempt.amount) &&
         amountToMinor(receivedAmount) === amountToMinor(attempt.amount) &&
-        providerTransaction.currency === attempt.currency && network === attempt.network_code && payerPhone === attempt.payer_phone
+        evidence.currency === attempt.currency && network === attempt.network_code && payerPhone === attempt.payer_phone
       if (!evidenceMatches) {
         if (attempt.state === 'VERIFIED_PENDING_LEDGER') return toPublicAttempt(attempt)
         return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, {
@@ -320,19 +324,19 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         }))
       }
       const evidenceDigest = sha256(JSON.stringify([
-        providerTransaction.depositId,
-        providerTransaction.status,
-        providerTransaction.country,
+        providerTransaction.transaction_id,
+        providerTransaction.provider_status || providerTransaction.outcome,
+        evidence.country,
         requestedAmount,
         receivedAmount,
-        providerTransaction.currency,
+        evidence.currency,
         network,
         payerPhone,
-        providerTransaction.providerTransactionId || null,
+        evidence.provider_transaction_id || null,
       ]))
       const verified = await repository.updateAttempt(attempt.attempt_id, {
-        state: 'VERIFIED_PENDING_LEDGER', providerStatus: 'COMPLETED',
-        providerReference: String(providerTransaction.providerTransactionId || '').slice(0, 128) || null,
+        state: 'VERIFIED_PENDING_LEDGER', providerStatus: status,
+        providerReference: String(evidence.provider_transaction_id || '').slice(0, 128) || null,
         verified: true, evidenceDigest,
       })
       if (verified.state !== 'VERIFIED_PENDING_LEDGER') return toPublicAttempt(verified)
@@ -352,7 +356,7 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
           String(attempt.attempt_id).toLowerCase() !== String(attemptId).toLowerCase() ||
           attempt.state !== 'SUCCEEDED' || !UUID.test(String(attempt.ledger_operation_id || '')) ||
           !UUID.test(String(attempt.attempt_id || '')) || !AMOUNT.test(String(attempt.amount || '')) ||
-          attempt.currency !== 'ZMW' || !RECEIPT_NETWORKS[attempt.network_code] ||
+          attempt.currency !== 'ZMW' || !(attempt.network_label || RECEIPT_NETWORKS[attempt.network_code]) ||
           !/^\d{7,15}$/.test(String(attempt.payer_phone || '')) || !Number.isFinite(Date.parse(attempt.verified_at)) ||
           typeof attempt.description !== 'string' || attempt.description.length > 240) {
         throw new PaymentLinkError('PAYMENT_RECEIPT_NOT_AVAILABLE', 404)
@@ -361,7 +365,7 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         amount: attempt.amount,
         currency: attempt.currency,
         description: attempt.description,
-        network: RECEIPT_NETWORKS[attempt.network_code],
+        network: attempt.network_label || RECEIPT_NETWORKS[attempt.network_code],
         phoneLast4: attempt.payer_phone.slice(-4),
         paidAt: new Date(attempt.verified_at).toISOString(),
         reference: attempt.attempt_id,
@@ -422,24 +426,24 @@ async function releaseFailedArReservation(itcFinanceClient, attempt, evidence) {
   if (attempt.collection_target_type !== 'AR_SETTLEMENT' || !itcFinanceClient ||
       typeof itcFinanceClient.releaseCustomerReceivablePayment !== 'function' ||
       !UUID.test(String(attempt.attempt_id || '')) || !UUID.test(String(attempt.created_by_customer_id || ''))) return false
-  const status = String(evidence?.status || '').toUpperCase()
-  if (!['REJECTED', 'FAILED', 'CANCELED'].includes(status)) return false
+  const outcome = String(evidence?.outcome || '').toUpperCase()
+  if (!['REJECTED', 'FAILED', 'CANCELLED'].includes(outcome)) return false
   const evidenceDigest = sha256(JSON.stringify([
     attempt.provider_transaction_id,
-    status,
+    outcome,
     evidence.providerStatus || null,
-    evidence.rejectionReason?.rejectionCode || null,
+    evidence.rejectionCode || null,
   ]))
-  const reasonCode = status === 'REJECTED' ? 'PROVIDER_REJECTED' : 'PROVIDER_FAILED'
+  const reasonCode = outcome === 'REJECTED' ? 'PROVIDER_REJECTED' : 'PROVIDER_FAILED'
   const idempotencyKey = `ew-ar-release-${attempt.attempt_id}`
   await itcFinanceClient.releaseCustomerReceivablePayment(attempt.attempt_id, {
     operation_id: attempt.attempt_id,
     actor_customer_id: attempt.created_by_customer_id,
     reason_code: reasonCode,
-    reason: `PawaPay deposit ended with ${status}`,
+    reason: `Collection provider ended with ${outcome}`,
     evidence_digest: evidenceDigest,
   }, idempotencyKey, attempt.attempt_id)
   return true
 }
 
-module.exports = { createPublicPaymentService, readProviderTransaction, toPublicAttempt, postConfirmedCollection }
+module.exports = { createPublicPaymentService, toPublicAttempt, postConfirmedCollection }

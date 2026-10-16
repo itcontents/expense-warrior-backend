@@ -108,7 +108,7 @@ async function submit({ pool, actor, request, attachment = null, idempotencyKey,
     if (actor.role === 'staff') {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`ew-payout-destination:${actor.customerId.toLowerCase()}`])
       const destinationResult = await client.query(`
-        SELECT destination_id, network_code, phone_ciphertext, encryption_key_id, phone_last4
+        SELECT destination_id, provider_code, network_code, phone_ciphertext, encryption_key_id, phone_last4
           FROM staff_payout_destinations
          WHERE staff_customer_id = $1 AND superseded_at IS NULL
          FOR SHARE
@@ -125,6 +125,7 @@ async function submit({ pool, actor, request, attachment = null, idempotencyKey,
         manager_assignment_id,
         reviewer_manager_customer_id,
         payout_destination_id,
+        payout_provider_code,
         payout_network_code,
         payout_phone_ciphertext,
         payout_encryption_key_id,
@@ -134,10 +135,10 @@ async function submit({ pool, actor, request, attachment = null, idempotencyKey,
         reason,
         status
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       RETURNING request_id, requester_customer_id, category_id, subcategory_id,
                 reviewer_manager_customer_id, amount::text, currency, reason, status,
-                payout_network_code, payout_phone_last4, created_at, submitted_at
+                payout_provider_code, payout_network_code, payout_phone_last4, created_at, submitted_at
     `, [
       actor.customerId,
       request.categoryId,
@@ -145,6 +146,7 @@ async function submit({ pool, actor, request, attachment = null, idempotencyKey,
       assignment?.assignment_id || null,
       assignment?.manager_customer_id || null,
       payoutDestination?.destination_id || null,
+      payoutDestination?.provider_code || null,
       payoutDestination?.network_code || null,
       payoutDestination?.phone_ciphertext || null,
       payoutDestination?.encryption_key_id || null,
@@ -318,7 +320,7 @@ async function revealPayoutDestination({ pool, requestId, actorId, decrypt, requ
   try {
     await client.query('BEGIN')
     const result = await client.query(`
-      SELECT requester_customer_id, status, payout_network_code, payout_phone_ciphertext,
+      SELECT requester_customer_id, status, payout_provider_code, payout_network_code, payout_phone_ciphertext,
              payout_encryption_key_id, payout_phone_last4
         FROM expense_requests
        WHERE request_id = $1
@@ -329,7 +331,7 @@ async function revealPayoutDestination({ pool, requestId, actorId, decrypt, requ
     if (!['PENDING_ADMIN', 'MANAGER_APPROVED', 'APPROVED_AWAITING_PAYOUT', 'PAYOUT_PENDING'].includes(request.status)) {
       throw new RequestRepositoryError('PAYOUT_DESTINATION_NOT_AVAILABLE', 409)
     }
-    if (!request.payout_network_code || !request.payout_phone_ciphertext || !request.payout_encryption_key_id) {
+    if (!request.payout_provider_code || !request.payout_network_code || !request.payout_phone_ciphertext || !request.payout_encryption_key_id) {
       throw new RequestRepositoryError('PAYOUT_DESTINATION_NOT_AVAILABLE', 409)
     }
     const phoneNumber = decrypt({
@@ -340,9 +342,9 @@ async function revealPayoutDestination({ pool, requestId, actorId, decrypt, requ
     await client.query(`
       INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, request_id, metadata)
       VALUES ($1, 'request.payout_destination.revealed', 'expense_request', $2, $3, $4::jsonb)
-    `, [actorId, requestId, requestIdForAudit, JSON.stringify({ network_code: request.payout_network_code, phone_last4: request.payout_phone_last4 })])
+    `, [actorId, requestId, requestIdForAudit, JSON.stringify({ provider_code: request.payout_provider_code, network_code: request.payout_network_code, phone_last4: request.payout_phone_last4 })])
     await client.query('COMMIT')
-    return { network_code: request.payout_network_code, phone_number: phoneNumber }
+    return { provider_code: request.payout_provider_code, network_code: request.payout_network_code, phone_number: phoneNumber }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})
     throw error

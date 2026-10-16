@@ -2,8 +2,6 @@ const crypto = require('node:crypto')
 const { consumeIdempotencyKey } = require('../integrations/itc/ItcFinanceClient')
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const NETWORKS = new Set(['AIRTEL_OAPI_ZMB', 'MTN_MOMO_ZMB', 'ZAMTEL_ZMB'])
-
 class StaffPayoutServiceError extends Error {
   constructor(code, statusCode = 503) {
     super(code)
@@ -18,35 +16,27 @@ function assertAdmin(actor) {
   if (String(actor.role || '').toLowerCase() !== 'admin') throw new StaffPayoutServiceError('FORBIDDEN', 403)
 }
 
-function payoutData(response) {
-  if (!response || typeof response !== 'object' || Array.isArray(response)) return null
-  if (response.status === 'FOUND') return response.data && typeof response.data === 'object' && !Array.isArray(response.data) ? response.data : null
-  return response
+function matchesPayout(result, payout, destination, expectedOutcome = 'SUCCEEDED') {
+  const evidence = result?.evidence
+  return result && result.transaction_id === payout.payout_id && result.outcome === expectedOutcome && evidence &&
+    evidence.country === 'ZMB' && evidence.amount === payout.amount && evidence.currency === payout.currency &&
+    evidence.network_code === payout.network_code && evidence.phone_number === destination.phone_number &&
+    evidence.client_reference === payout.client_reference_id &&
+    (expectedOutcome !== 'SUCCEEDED' || (typeof evidence.provider_transaction_id === 'string' && evidence.provider_transaction_id.length > 0 && evidence.provider_transaction_id.length <= 128))
 }
 
-function matchesPayout(data, payout, destination, expectedStatus = 'COMPLETED') {
-  return data && data.payoutId === payout.payout_id &&
-    data.country === 'ZMB' && data.amount === payout.amount &&
-    data.currency === payout.currency && data.status === expectedStatus &&
-    data.recipient?.type === 'MMO' &&
-    data.recipient?.accountDetails?.phoneNumber === destination.phone_number &&
-    data.recipient?.accountDetails?.provider === payout.network_code &&
-    data.clientReferenceId === payout.client_reference_id &&
-    (expectedStatus !== 'COMPLETED' || (typeof data.providerTransactionId === 'string' && data.providerTransactionId.length > 0 && data.providerTransactionId.length <= 128))
-}
-
-function evidenceDigest(data) {
+function evidenceDigest(result) {
+  const evidence = result.evidence
   const canonical = [
-    data.payoutId, data.providerTransactionId, data.status, data.country,
-    data.amount, data.currency, data.recipient.type,
-    data.recipient.accountDetails.phoneNumber,
-    data.recipient.accountDetails.provider, data.clientReferenceId,
+    result.transaction_id, evidence.provider_transaction_id, result.provider_status || result.outcome,
+    result.outcome, evidence.country, evidence.amount, evidence.currency,
+    evidence.phone_number, evidence.network_code, evidence.client_reference,
   ].join('\n')
   return crypto.createHash('sha256').update(canonical).digest('hex')
 }
 
-function getProviderForOperation(providerRegistry, providerCode, operation) {
-  if (typeof providerRegistry?.getForOperation === 'function') return providerRegistry.getForOperation(providerCode, operation)
+function getProviderForOperation(providerRegistry, providerCode, operation, accountIdentity = null) {
+  if (typeof providerRegistry?.getForOperation === 'function') return providerRegistry.getForOperation(providerCode, operation, accountIdentity)
   const provider = providerRegistry?.get?.(providerCode)
   const methods = { payout: ['initiatePayout', 'getPayoutStatus'] }[operation] || []
   return provider && methods.every((method) => typeof provider[method] === 'function') ? provider : null
@@ -63,7 +53,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     throw new TypeError('Staff payout dependencies are required')
   }
 
-  async function revealDestination(actor, requestId, requestIdForAudit, expectedNetworkCode = null) {
+  async function revealDestination(actor, requestId, requestIdForAudit, expectedNetworkCode = null, expectedProviderCode = null) {
     if (typeof repository.revealPayoutDestination !== 'function') throw new StaffPayoutServiceError('PAYOUT_DESTINATION_UNAVAILABLE')
     try {
       const destination = await repository.revealPayoutDestination({
@@ -72,7 +62,11 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
         requestIdForAudit,
         decrypt: ({ staffId, keyId, ciphertext }) => phoneVault.decrypt({ staffId, keyId, ciphertext }),
       })
-      if (!destination || !NETWORKS.has(destination.network_code) || !/^260\d{9}$/.test(String(destination.phone_number || '')) ||
+      const providerCode = destination?.provider_code || expectedProviderCode || 'pawapay'
+      let networks = []
+      try { networks = providerRegistry.getNetworks(providerCode, 'payout') } catch (_error) {}
+      if (!destination || !Array.isArray(networks) || !networks.some(({ code }) => code === destination.network_code) ||
+          (expectedProviderCode && providerCode !== expectedProviderCode) || !/^260\d{9}$/.test(String(destination.phone_number || '')) ||
           (expectedNetworkCode && destination.network_code !== expectedNetworkCode)) {
         throw new StaffPayoutServiceError('PAYOUT_DESTINATION_INVALID', 422)
       }
@@ -88,28 +82,65 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     return { request: { request_id: payout.request_id, status: 'PAYOUT_PENDING' }, pending: true, errorCode: code }
   }
 
+  async function payoutRouteSnapshot(requestId) {
+    const selection = typeof repository.getPayoutProviderSelection === 'function'
+      ? await repository.getPayoutProviderSelection(requestId)
+      : null
+    const providerCode = selection?.provider_code || 'pawapay'
+    const networkCode = selection?.network_code || null
+    let network = null
+    if (networkCode && typeof providerRegistry.getNetworks === 'function') {
+      let networks
+      try { networks = providerRegistry.getNetworks(providerCode, 'payout') }
+      catch (_error) { throw new StaffPayoutServiceError('PROVIDER_CAPABILITY_UNAVAILABLE', 503) }
+      network = networks.find((item) => item.code === networkCode) || null
+      if (!network) throw new StaffPayoutServiceError('PAYOUT_DESTINATION_INVALID', 422)
+    }
+    let accountIdentity = selection?.provider_account_id && selection?.provider_account_version
+      ? { provider_account_id: selection.provider_account_id, provider_account_version: Number(selection.provider_account_version) }
+      : null
+    if (!accountIdentity && typeof providerRegistry.getAccountIdentity === 'function') {
+      try { accountIdentity = providerRegistry.getAccountIdentity(providerCode) }
+      catch (_error) { throw new StaffPayoutServiceError('PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE', 503) }
+      if (!accountIdentity?.provider_account_id || !Number.isSafeInteger(accountIdentity.provider_account_version)) {
+        throw new StaffPayoutServiceError('PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE', 503)
+      }
+    }
+    return {
+      providerCode,
+      providerAccountId: accountIdentity?.provider_account_id || null,
+      providerAccountVersion: accountIdentity?.provider_account_version || null,
+      providerNetworkLabel: network?.label || null,
+    }
+  }
+
   async function retrySameProviderPayoutId(actor, request, payout, destination, requestIdForAudit) {
     let provider
-    try { provider = getProviderForOperation(providerRegistry, payout.provider_code || 'pawapay', 'payout') }
+    const accountIdentity = payout.provider_account_id && payout.provider_account_version
+      ? { provider_account_id: payout.provider_account_id, provider_account_version: payout.provider_account_version }
+      : null
+    try { provider = getProviderForOperation(providerRegistry, payout.provider_code || 'pawapay', 'payout', accountIdentity) }
     catch (_error) { return markUnknown(actor, payout, 'PROVIDER_CAPABILITY_UNAVAILABLE', requestIdForAudit) }
     if (!provider) return markUnknown(actor, payout, 'PROVIDER_CAPABILITY_UNAVAILABLE', requestIdForAudit)
     try {
       const response = await provider.initiatePayout({
-        payoutId: payout.payout_id,
+        transaction_id: payout.payout_id,
+        country: 'ZMB',
+        currency: payout.currency,
         amount: payout.amount,
-        phoneNumber: destination.phone_number,
-        provider: destination.network_code,
-        clientReferenceId: payout.client_reference_id,
-        customerMessage: 'Expense request payout',
+        phone_number: destination.phone_number,
+        network_code: destination.network_code,
+        client_reference: payout.client_reference_id,
+        customer_message: 'Expense request payout',
       })
-      if (response?.payoutId !== payout.payout_id || !['ACCEPTED', 'DUPLICATE_IGNORED', 'REJECTED'].includes(response?.status)) {
+      if (response?.transaction_id !== payout.payout_id || !['ACCEPTED', 'DUPLICATE', 'REJECTED'].includes(response?.outcome)) {
         return markUnknown(actor, payout, 'PROVIDER_RESPONSE_INVALID', requestIdForAudit)
       }
-      if (response.status === 'REJECTED') {
-        await repository.recordInitiation({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus: 'REJECTED', errorCode: 'PROVIDER_REJECTED', requestIdForAudit })
+      if (response.outcome === 'REJECTED') {
+        await repository.recordInitiation({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus: response.provider_status || 'REJECTED', errorCode: 'PROVIDER_REJECTED', requestIdForAudit })
         return releaseFailedPayout(actor, request, payout, 'PROVIDER_REJECTED', requestIdForAudit)
       }
-      await repository.markPending({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus: response.status, requestIdForAudit })
+      await repository.markPending({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus: response.provider_status || response.outcome, requestIdForAudit })
       return { request: { request_id: request.request_id, status: 'PAYOUT_PENDING' }, pending: true }
     } catch (_error) {
       return markUnknown(actor, payout, 'PROVIDER_OUTCOME_UNKNOWN', requestIdForAudit)
@@ -131,12 +162,15 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
         operation_id: operation.operationId,
         actor_customer_id: actor.customerId,
         reason_code: reasonCode,
-        reason: `PawaPay payout ${payout.payout_id} failed: ${reasonCode}`,
+        reason: `${payout.provider_code || 'pawapay'} payout ${payout.payout_id} failed: ${reasonCode}`,
       }, operation.idempotencyKey, requestIdForAudit)
       const financeOperation = result?.operation
       if (!financeOperation || String(financeOperation.operation_id).toLowerCase() !== String(operation.operationId).toLowerCase() ||
           String(financeOperation.request_id).toLowerCase() !== String(request.request_id).toLowerCase() ||
           String(financeOperation.hold_id).toLowerCase() !== String(operation.holdId).toLowerCase() ||
+          financeOperation.provider_code !== (payout.provider_code || 'pawapay') ||
+          String(financeOperation.provider_account_id).toLowerCase() !== String(payout.provider_account_id).toLowerCase() ||
+          Number(financeOperation.provider_account_version) !== Number(payout.provider_account_version) ||
           financeOperation.state !== 'RELEASED') {
         throw new StaffPayoutServiceError('ITC_FINANCE_RESPONSE_INVALID', 502)
       }
@@ -155,7 +189,10 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
 
   async function reconcilePrepared(actor, request, payout, requestIdForAudit) {
     let provider
-    try { provider = getProviderForOperation(providerRegistry, payout.provider_code || 'pawapay', 'payout') }
+    const accountIdentity = payout.provider_account_id && payout.provider_account_version
+      ? { provider_account_id: payout.provider_account_id, provider_account_version: payout.provider_account_version }
+      : null
+    try { provider = getProviderForOperation(providerRegistry, payout.provider_code || 'pawapay', 'payout', accountIdentity) }
     catch (_error) { return markUnknown(actor, payout, 'PROVIDER_STATUS_CAPABILITY_UNAVAILABLE', requestIdForAudit) }
     if (!provider) return markUnknown(actor, payout, 'PROVIDER_STATUS_CAPABILITY_UNAVAILABLE', requestIdForAudit)
     let response
@@ -164,30 +201,35 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     } catch (_error) {
       return markUnknown(actor, payout, 'PROVIDER_STATUS_UNAVAILABLE', requestIdForAudit)
     }
-    if (response?.status === 'NOT_FOUND') {
+    if (response?.outcome === 'NOT_FOUND') {
       if (['SUBMITTING', 'UNKNOWN'].includes(payout.state)) {
-        const destination = await revealDestination(actor, request.request_id, requestIdForAudit, payout.network_code)
+        const destination = await revealDestination(actor, request.request_id, requestIdForAudit, payout.network_code, payout.provider_code)
         return retrySameProviderPayoutId(actor, request, payout, destination, requestIdForAudit)
       }
       return markUnknown(actor, payout, 'PROVIDER_STATUS_NOT_FOUND', requestIdForAudit)
     }
-    const data = payoutData(response)
-    if (!data || data.payoutId !== payout.payout_id) return markUnknown(actor, payout, 'PROVIDER_EVIDENCE_MISMATCH', requestIdForAudit)
-    if (data.status === 'FAILED') {
-      const destination = await revealDestination(actor, request.request_id, requestIdForAudit)
-      if (!matchesPayout(data, payout, destination, 'FAILED')) {
+    if (!response || response.transaction_id !== payout.payout_id ||
+        !['PENDING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN'].includes(response.outcome)) {
+      return markUnknown(actor, payout, 'PROVIDER_EVIDENCE_MISMATCH', requestIdForAudit)
+    }
+    const providerStatus = response.provider_status || response.outcome
+    if (response.outcome === 'FAILED' || response.outcome === 'CANCELLED') {
+      const destination = await revealDestination(actor, request.request_id, requestIdForAudit, payout.network_code, payout.provider_code)
+      if (!matchesPayout(response, payout, destination, response.outcome)) {
         await repository.markVerificationRequired({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, errorCode: 'PROVIDER_EVIDENCE_MISMATCH', requestIdForAudit })
         return { request: { request_id: request.request_id, status: 'PAYOUT_PENDING' }, pending: true, errorCode: 'PROVIDER_EVIDENCE_MISMATCH' }
       }
-      return releaseFailedPayout(actor, request, payout, 'PROVIDER_PAYOUT_FAILED', requestIdForAudit)
+      const reasonCode = response.outcome === 'CANCELLED' ? 'PROVIDER_PAYOUT_CANCELLED' : 'PROVIDER_PAYOUT_FAILED'
+      return releaseFailedPayout(actor, request, payout, reasonCode, requestIdForAudit)
     }
-    if (data.status !== 'COMPLETED') {
-      await repository.markPending({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus: data.status || 'UNKNOWN', requestIdForAudit })
+    if (response.outcome === 'PENDING') {
+      await repository.markPending({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, providerStatus, requestIdForAudit })
       return { request: { request_id: request.request_id, status: 'PAYOUT_PENDING' }, pending: true }
     }
+    if (response.outcome === 'UNKNOWN') return markUnknown(actor, payout, 'PROVIDER_STATUS_UNKNOWN', requestIdForAudit)
 
-    const destination = await revealDestination(actor, request.request_id, requestIdForAudit, payout.network_code)
-    if (!matchesPayout(data, payout, destination)) {
+    const destination = await revealDestination(actor, request.request_id, requestIdForAudit, payout.network_code, payout.provider_code)
+    if (!matchesPayout(response, payout, destination)) {
       await repository.markVerificationRequired({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, errorCode: 'PROVIDER_EVIDENCE_MISMATCH', requestIdForAudit })
       return { request: { request_id: request.request_id, status: 'PAYOUT_PENDING' }, pending: true, errorCode: 'PROVIDER_EVIDENCE_MISMATCH' }
     }
@@ -200,17 +242,20 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
       actor_customer_id: actor.customerId,
       expense_category_code: request.finance_expense_category_code,
       payout_attempt_id: payout.payout_attempt_id,
-      provider_transaction_id: data.providerTransactionId,
+      provider_transaction_id: response.evidence.provider_transaction_id,
       provider_reference: payout.client_reference_id,
+      provider_code: payout.provider_code || 'pawapay',
+      provider_account_id: payout.provider_account_id,
+      provider_account_version: payout.provider_account_version,
       amount: payout.amount,
       currency: payout.currency,
       verified_at: verifiedAt,
-      evidence_digest: evidenceDigest(data),
+      evidence_digest: evidenceDigest(response),
     }
     let result
     try {
       result = await financeClient.consume(request.finance_hold_id, consumePayload,
-        consumeIdempotencyKey(data.providerTransactionId), requestIdForAudit)
+        consumeIdempotencyKey(response.evidence.provider_transaction_id), requestIdForAudit)
     } catch (error) {
       const code = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'ITC_FINANCE_UNAVAILABLE'
       await repository.markVerificationRequired({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, errorCode: code, requestIdForAudit })
@@ -220,8 +265,11 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     if (!financeOperation || String(financeOperation.operation_id).toLowerCase() !== String(payout.consume_operation_id).toLowerCase() ||
         String(financeOperation.request_id).toLowerCase() !== String(request.request_id).toLowerCase() ||
         String(financeOperation.hold_id).toLowerCase() !== String(request.finance_hold_id).toLowerCase() ||
+        financeOperation.provider_code !== (payout.provider_code || 'pawapay') ||
+        String(financeOperation.provider_account_id).toLowerCase() !== String(payout.provider_account_id).toLowerCase() ||
+        Number(financeOperation.provider_account_version) !== Number(payout.provider_account_version) ||
         String(financeOperation.payout_attempt_id).toLowerCase() !== String(payout.payout_attempt_id).toLowerCase() ||
-        String(financeOperation.provider_transaction_id) !== String(data.providerTransactionId) ||
+        String(financeOperation.provider_transaction_id) !== String(response.evidence.provider_transaction_id) ||
         financeOperation.state !== 'CONSUMED' || financeOperation.amount !== payout.amount ||
         financeOperation.currency !== payout.currency || financeOperation.expense_category_code !== request.finance_expense_category_code) {
       await repository.markVerificationRequired({ actorId: actor.customerId, requestId: request.request_id, payoutId: payout.payout_id, errorCode: 'ITC_FINANCE_RESPONSE_INVALID', requestIdForAudit })
@@ -229,8 +277,8 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     }
     const completed = await repository.completePayout({
       actor: { customerId: actor.customerId, role: 'admin' }, requestId: request.request_id,
-      payoutId: payout.payout_id, providerTransactionId: data.providerTransactionId,
-      providerStatus: data.status, providerReference: data.providerTransactionId,
+      payoutId: payout.payout_id, providerTransactionId: response.evidence.provider_transaction_id,
+      providerStatus, providerReference: response.evidence.provider_transaction_id,
       financeOperation, verifiedAt, requestIdForAudit,
     })
     return { request: completed, pending: false, replayed: Boolean(result.replayed) }
@@ -239,7 +287,11 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
   async function finalApprove(actor, requestId, requestIdForAudit = null) {
     assertAdmin(actor)
     if (!UUID.test(String(requestId || ''))) throw new StaffPayoutServiceError('INVALID_REQUEST', 400)
-    let prepared = await repository.prepareFinalApproval({ actor: { customerId: actor.customerId, role: 'admin' }, requestId, requestIdForAudit })
+    const routeSnapshot = await payoutRouteSnapshot(requestId)
+    const prepare = () => repository.prepareFinalApproval({
+      actor: { customerId: actor.customerId, role: 'admin' }, requestId, requestIdForAudit, ...routeSnapshot,
+    })
+    let prepared = await prepare()
     if (prepared.replayed && prepared.request?.status === 'PAID') return { request: prepared.request, pending: false, replayed: true }
     if (prepared.requiresReservation) {
       let reservation = prepared.reservation
@@ -273,6 +325,9 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
           amount: reservation.amount,
           currency: reservation.currency,
           expense_category_code: reservation.expenseCategoryCode,
+          provider_code: routeSnapshot.providerCode,
+          provider_account_id: routeSnapshot.providerAccountId,
+          provider_account_version: routeSnapshot.providerAccountVersion,
           purpose: `Expense request ${requestId}`,
         }, reservation.idempotencyKey, requestIdForAudit)
         const financeOperation = result?.operation
@@ -281,19 +336,23 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
             String(financeOperation.amount) !== reservation.amount || financeOperation.currency !== reservation.currency ||
             financeOperation.state !== 'ACTIVE' || !UUID.test(String(financeOperation.hold_id || '')) ||
             financeOperation.expense_category_code !== reservation.expenseCategoryCode ||
-            financeOperation.expense_account_code !== reservation.expenseAccountCode) {
+        financeOperation.expense_account_code !== reservation.expenseAccountCode ||
+            financeOperation.provider_code !== reservation.providerCode ||
+            String(financeOperation.provider_account_id).toLowerCase() !== String(reservation.providerAccountId).toLowerCase() ||
+            Number(financeOperation.provider_account_version) !== reservation.providerAccountVersion) {
           throw new StaffPayoutServiceError('ITC_FINANCE_RESPONSE_INVALID', 502)
         }
         await repository.completeAdminReservation({
           actor: { customerId: actor.customerId, role: 'admin' }, requestId,
           reservation, financeOperation, requestIdForAudit,
         })
-        prepared = await repository.prepareFinalApproval({ actor: { customerId: actor.customerId, role: 'admin' }, requestId, requestIdForAudit })
+        prepared = await prepare()
       } catch (error) {
         const code = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'ITC_FINANCE_UNAVAILABLE'
         const definitiveFailure = new Set([
           'INSUFFICIENT_FUNDS', 'TREASURY_MAPPING_UNAVAILABLE', 'TREASURY_ACCOUNT_UNAVAILABLE',
-          'EXPENSE_CATEGORY_NOT_POSTABLE', 'IDENTITY_UNAVAILABLE', 'INVALID_RESERVATION',
+          'PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE', 'EXPENSE_CATEGORY_NOT_POSTABLE',
+          'IDENTITY_UNAVAILABLE', 'INVALID_RESERVATION',
         ]).has(code)
         try {
           await repository.markAdminReservationFailure({
@@ -312,31 +371,36 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     const payout = prepared.payout
     if (!request || !payout) throw new StaffPayoutServiceError('PAYOUT_PREPARATION_INVALID', 503)
     if (prepared.shouldInitiate) {
-      const destination = await revealDestination(actor, requestId, requestIdForAudit, payout.network_code)
+      const destination = await revealDestination(actor, requestId, requestIdForAudit, payout.network_code, payout.provider_code)
       let provider
-      try { provider = getProviderForOperation(providerRegistry, payout.provider_code || 'pawapay', 'payout') }
+      const accountIdentity = payout.provider_account_id && payout.provider_account_version
+        ? { provider_account_id: payout.provider_account_id, provider_account_version: payout.provider_account_version }
+        : null
+      try { provider = getProviderForOperation(providerRegistry, payout.provider_code || 'pawapay', 'payout', accountIdentity) }
       catch (_error) {
         return releaseFailedPayout(actor, request, payout, 'PROVIDER_CAPABILITY_UNAVAILABLE', requestIdForAudit)
       }
       if (!provider) return releaseFailedPayout(actor, request, payout, 'PROVIDER_CAPABILITY_UNAVAILABLE', requestIdForAudit)
       try {
         const response = await provider.initiatePayout({
-          payoutId: payout.payout_id,
+          transaction_id: payout.payout_id,
+          country: 'ZMB',
+          currency: payout.currency,
           amount: payout.amount,
-          phoneNumber: destination.phone_number,
-          provider: destination.network_code,
-          clientReferenceId: payout.client_reference_id,
-          customerMessage: 'Expense request payout',
+          phone_number: destination.phone_number,
+          network_code: destination.network_code,
+          client_reference: payout.client_reference_id,
+          customer_message: 'Expense request payout',
         })
-        if (response?.payoutId !== payout.payout_id || !['ACCEPTED', 'DUPLICATE_IGNORED', 'REJECTED'].includes(response?.status)) {
+        if (response?.transaction_id !== payout.payout_id || !['ACCEPTED', 'DUPLICATE', 'REJECTED'].includes(response?.outcome)) {
           await repository.markUnknown({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, errorCode: 'PROVIDER_RESPONSE_INVALID', requestIdForAudit })
           return { request: { request_id: requestId, status: 'PAYOUT_PENDING' }, pending: true, errorCode: 'PROVIDER_RESPONSE_INVALID' }
         }
-        if (response.status === 'REJECTED') {
-          await repository.recordInitiation({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, providerStatus: 'REJECTED', errorCode: 'PROVIDER_REJECTED', requestIdForAudit })
+        if (response.outcome === 'REJECTED') {
+          await repository.recordInitiation({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, providerStatus: response.provider_status || 'REJECTED', errorCode: 'PROVIDER_REJECTED', requestIdForAudit })
           return releaseFailedPayout(actor, request, payout, 'PROVIDER_REJECTED', requestIdForAudit)
         }
-        await repository.recordInitiation({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, providerStatus: response.status, requestIdForAudit })
+        await repository.recordInitiation({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, providerStatus: response.provider_status || response.outcome, requestIdForAudit })
       } catch (_error) {
         await repository.markUnknown({ actorId: actor.customerId, requestId, payoutId: payout.payout_id, errorCode: 'PROVIDER_OUTCOME_UNKNOWN', requestIdForAudit })
         return { request: { request_id: requestId, status: 'PAYOUT_PENDING' }, pending: true, errorCode: 'PROVIDER_OUTCOME_UNKNOWN' }

@@ -341,7 +341,8 @@ test('provider registry selects PawaPay by normalized code and rejects unknown p
     pawaPayConfig: config,
     dependencies: { pawapay: { fetchImpl: async () => {} } },
   })
-  assert.ok(registry.get(' PawaPay ') instanceof PawaPayClient)
+  assert.equal(registry.get(' PawaPay ').contractVersion, 1)
+  assert.equal(typeof registry.getForOperation('pawapay', 'deposit').getDepositStatus, 'function')
   assert.deepEqual(registry.list(), ['pawapay'])
   assert.throws(() => registry.get('unconfigured-provider'), { code: 'PAYMENT_PROVIDER_UNSUPPORTED' })
 })

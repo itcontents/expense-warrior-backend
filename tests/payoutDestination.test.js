@@ -119,7 +119,7 @@ test('destination route verifies eligible identity before returning only masked 
     const payload = await response.json()
     assert.equal(response.status, 200)
     assert.deepEqual(directoryQuery.ids, [staffId])
-    assert.deepEqual(assigned, [admin, staffId, 'AIRTEL_OAPI_ZMB', '260957909783'])
+    assert.deepEqual(assigned, [admin, staffId, 'AIRTEL_OAPI_ZMB', '260957909783', 'pawapay'])
     assert.equal(payload.data.destination.phone_last4, '9783')
     assert.equal(JSON.stringify(payload).includes('260957909783'), false)
     assert.equal(JSON.stringify(payload).includes('ciphertext'), false)

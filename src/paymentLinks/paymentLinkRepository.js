@@ -16,7 +16,7 @@ function createPaymentLinkRepository({ pool } = {}) {
     async getAttemptByIdempotency(tokenHash, idempotencyKey) {
       const result = await pool.query(`
         SELECT a.attempt_id, a.payment_link_id, a.request_fingerprint, a.provider_code,
-               a.provider_transaction_id, a.network_code, a.payer_phone, a.amount::text, a.currency,
+               a.provider_transaction_id, a.network_code, a.network_label, a.payer_phone, a.amount::text, a.currency,
                a.state, a.provider_status, a.provider_reference, a.created_at, a.updated_at,
                a.verified_at, a.ledger_operation_id, a.provider_evidence_digest,
                a.provider_account_id, a.provider_account_version,
@@ -44,7 +44,7 @@ function createPaymentLinkRepository({ pool } = {}) {
         const link = linkResult.rows[0]
         if (!link) throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
         const priorResult = await client.query(`
-          SELECT attempt_id, payment_link_id, request_fingerprint, provider_transaction_id, network_code,
+          SELECT attempt_id, payment_link_id, request_fingerprint, provider_transaction_id, network_code, network_label,
                  payer_phone, amount::text, currency, state, provider_status, created_at, updated_at,
                  provider_account_id, provider_account_version
             FROM payment_link_attempts
@@ -61,14 +61,14 @@ function createPaymentLinkRepository({ pool } = {}) {
         const inserted = await client.query(`
           INSERT INTO payment_link_attempts (
             attempt_id, payment_link_id, idempotency_key, request_fingerprint,
-            provider_code, provider_transaction_id, network_code, payer_phone,
+            provider_code, provider_transaction_id, network_code, network_label, payer_phone,
             amount, currency, state, provider_account_id, provider_account_version
-          ) VALUES ($1,$2,$3,$4,$5,$1,$6,$7,$8,$9,'SUBMITTING',$10,$11)
-          RETURNING attempt_id, payment_link_id, provider_transaction_id, network_code,
+          ) VALUES ($1,$2,$3,$4,$5,$1,$6,$7,$8,$9,$10,'SUBMITTING',$11,$12)
+          RETURNING attempt_id, payment_link_id, provider_transaction_id, network_code, network_label,
                     payer_phone, amount::text, currency, state, provider_status, created_at, updated_at,
                     provider_account_id, provider_account_version
         `, [input.attemptId, link.payment_link_id, input.idempotencyKey, input.requestFingerprint,
-          input.providerCode, input.networkCode, input.phoneNumber, link.amount, link.currency,
+          input.providerCode, input.networkCode, input.networkLabel, input.phoneNumber, link.amount, link.currency,
           input.providerAccountId || null, input.providerAccountVersion || null])
         await client.query('COMMIT')
         return { link, attempt: inserted.rows[0], replayed: false }
@@ -81,7 +81,7 @@ function createPaymentLinkRepository({ pool } = {}) {
     },
     async getPublicAttempt(tokenHash, attemptId) {
       const result = await pool.query(`
-        SELECT a.attempt_id, a.provider_code, a.provider_transaction_id, a.network_code, a.payer_phone,
+        SELECT a.attempt_id, a.provider_code, a.provider_transaction_id, a.network_code, a.network_label, a.payer_phone,
                a.amount::text, a.currency, a.state, a.provider_status, a.provider_reference,
                a.created_at, a.updated_at, a.verified_at, a.ledger_operation_id,
                a.provider_evidence_digest,

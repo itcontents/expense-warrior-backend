@@ -20,7 +20,7 @@ function fakePool(handler) {
       calls.push({ sql, values })
       const result = await handler(sql, values, calls)
       if (sql.includes('FROM staff_payout_destinations') && !result?.noDestination && !result?.rows?.length) {
-        return { rowCount: 1, rows: [{ destination_id: '89f85a3c-6bf8-4976-8cdc-2ec2ca88c929', network_code: 'AIRTEL_OAPI_ZMB', phone_ciphertext: 'cipher.envelope.value', encryption_key_id: 'k1', phone_last4: '9783' }] }
+        return { rowCount: 1, rows: [{ destination_id: '89f85a3c-6bf8-4976-8cdc-2ec2ca88c929', provider_code: 'pawapay', network_code: 'AIRTEL_OAPI_ZMB', phone_ciphertext: 'cipher.envelope.value', encryption_key_id: 'k1', phone_last4: '9783' }] }
       }
       return result
     },
@@ -117,10 +117,11 @@ test('submitRequest_snapshotsAssignedManagerAndRoutesToManagerFirst', async () =
   assert.equal(result.replayed, false)
   const insert = calls.find((call) => call.sql.includes('INSERT INTO expense_requests'))
   assert.equal(insert.values[5], '89f85a3c-6bf8-4976-8cdc-2ec2ca88c929')
-  assert.equal(insert.values[6], 'AIRTEL_OAPI_ZMB')
-  assert.equal(insert.values[7], 'cipher.envelope.value')
-  assert.equal(insert.values[8], 'k1')
-  assert.equal(insert.values[9], '9783')
+  assert.equal(insert.values[6], 'pawapay')
+  assert.equal(insert.values[7], 'AIRTEL_OAPI_ZMB')
+  assert.equal(insert.values[8], 'cipher.envelope.value')
+  assert.equal(insert.values[9], 'k1')
+  assert.equal(insert.values[10], '9783')
 })
 
 test('submitRequest_rejectsWhenStaffHasNoCurrentPayoutDestination', async () => {
@@ -142,7 +143,7 @@ test('revealPayoutDestination_decryptsOnlyEligibleRequestAndAuditsWithoutPhone',
     if (sql.includes('FROM expense_requests') && sql.includes('payout_network_code')) {
       return { rowCount: 1, rows: [{
         requester_customer_id: '45a79d36-1c70-4622-84d2-145a26f288d3', status: 'PENDING_ADMIN',
-        payout_network_code: 'AIRTEL_OAPI_ZMB', payout_phone_ciphertext: phoneCiphertext,
+        payout_provider_code: 'pawapay', payout_network_code: 'AIRTEL_OAPI_ZMB', payout_phone_ciphertext: phoneCiphertext,
         payout_encryption_key_id: 'k1', payout_phone_last4: '9783',
       }] }
     }
@@ -157,13 +158,13 @@ test('revealPayoutDestination_decryptsOnlyEligibleRequestAndAuditsWithoutPhone',
     decrypt: (input) => { decrypted = input; return '260957909783' },
   })
 
-  assert.deepEqual(result, { network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783' })
+  assert.deepEqual(result, { provider_code: 'pawapay', network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783' })
   assert.equal(decrypted.ciphertext, phoneCiphertext)
   assert.ok(calls.some((call) => call.sql === 'BEGIN'))
   const audit = calls.find((call) => call.sql.includes('INSERT INTO audit_events'))
   assert.ok(audit)
   assert.match(audit.sql, /'request\.payout_destination\.revealed'/)
-  assert.deepEqual(JSON.parse(audit.values[3]), { network_code: 'AIRTEL_OAPI_ZMB', phone_last4: '9783' })
+  assert.deepEqual(JSON.parse(audit.values[3]), { provider_code: 'pawapay', network_code: 'AIRTEL_OAPI_ZMB', phone_last4: '9783' })
   assert.equal(JSON.stringify(audit.values).includes('260957909783'), false)
   assert.ok(calls.some((call) => call.sql === 'COMMIT'))
 })
@@ -173,7 +174,7 @@ test('revealPayoutDestination_refusesInactiveRequestBeforeDecryptOrAudit', async
     if (sql.includes('FROM expense_requests') && sql.includes('payout_network_code')) {
       return { rowCount: 1, rows: [{
         requester_customer_id: '45a79d36-1c70-4622-84d2-145a26f288d3', status: 'REJECTED_ADMIN',
-        payout_network_code: 'AIRTEL_OAPI_ZMB', payout_phone_ciphertext: 'sealed', payout_encryption_key_id: 'k1', payout_phone_last4: '9783',
+        payout_provider_code: 'pawapay', payout_network_code: 'AIRTEL_OAPI_ZMB', payout_phone_ciphertext: 'sealed', payout_encryption_key_id: 'k1', payout_phone_last4: '9783',
       }] }
     }
     return { rowCount: 1, rows: [] }

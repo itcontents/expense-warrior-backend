@@ -29,31 +29,49 @@ function createWalletBalanceService({ providerRegistry, snapshotRepository = nul
   if (!providerRegistry || typeof providerRegistry.get !== 'function') throw new TypeError('A payment provider registry is required')
   if (snapshotRepository && typeof snapshotRepository.recordBatch !== 'function') throw new TypeError('A provider balance snapshot repository is invalid')
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 1000 || ttlMs > 300000) throw new TypeError('Balance cache TTL must be between 1 and 300 seconds')
-  let cached = null
-  let refreshPromise = null
+  const cachedByProvider = new Map()
+  const refreshesByProvider = new Map()
 
   return Object.freeze({
-    async getBalance({ forceRefresh = false } = {}) {
+    async getBalance({ providerCode = 'pawapay', forceRefresh = false } = {}) {
+      const selectedProviderCode = String(providerCode || '').trim().toLowerCase()
+      if (!/^[a-z][a-z0-9_]{1,31}$/.test(selectedProviderCode)) {
+        throw new WalletBalanceServiceError('PAYMENT_PROVIDER_UNSUPPORTED', 422)
+      }
+      const cached = cachedByProvider.get(selectedProviderCode) || null
       const currentTime = now()
       if (cached && !forceRefresh && currentTime - cached.fetchedAtMs < ttlMs) {
-        return { provider: 'pawapay', country: 'ZMB', balances: structuredClone(cached.balances), fetched_at: cached.fetchedAt, stale: false, cached: true }
+        return { provider: selectedProviderCode, provider_account_id: cached.providerAccountId, provider_account_version: cached.providerAccountVersion,
+          country: 'ZMB', balances: structuredClone(cached.balances), fetched_at: cached.fetchedAt, stale: false, cached: true }
       }
-      if (!refreshPromise) {
-        refreshPromise = (async () => {
+      if (!refreshesByProvider.has(selectedProviderCode)) {
+        const refreshPromise = (async () => {
           try {
             const provider = typeof providerRegistry.getForOperation === 'function'
-              ? providerRegistry.getForOperation('pawapay', 'balance')
-              : providerRegistry.get('pawapay')
+              ? providerRegistry.getForOperation(selectedProviderCode, 'balance')
+              : providerRegistry.get(selectedProviderCode)
             if (!provider || typeof provider.getWalletBalances !== 'function') throw new WalletBalanceServiceError('PROVIDER_BALANCE_CAPABILITY_UNAVAILABLE')
             const response = await provider.getWalletBalances({ country: 'ZMB' })
             const balances = normalizeBalances(response)
+            let accountIdentity = null
+            try { accountIdentity = providerRegistry.getAccountIdentity?.(selectedProviderCode) || null } catch (_error) {
+              throw new WalletBalanceServiceError('PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE')
+            }
             const fetchedAtMs = now()
-            cached = { balances, fetchedAtMs, fetchedAt: new Date(fetchedAtMs).toISOString() }
-            const result = { provider: 'pawapay', country: 'ZMB', balances, fetched_at: cached.fetchedAt, stale: false, cached: false }
+            const entry = {
+              balances, fetchedAtMs, fetchedAt: new Date(fetchedAtMs).toISOString(),
+              providerAccountId: accountIdentity?.provider_account_id || null,
+              providerAccountVersion: accountIdentity?.provider_account_version || null,
+            }
+            cachedByProvider.set(selectedProviderCode, entry)
+            const result = { provider: selectedProviderCode, provider_account_id: entry.providerAccountId,
+              provider_account_version: entry.providerAccountVersion, country: 'ZMB', balances, fetched_at: entry.fetchedAt, stale: false, cached: false }
             if (snapshotRepository) {
               try {
                 const snapshot = await snapshotRepository.recordBatch({
-                  provider: 'pawapay', country: 'ZMB', balances, retrievedAt: cached.fetchedAt,
+                  provider: selectedProviderCode, providerAccountId: entry.providerAccountId,
+                  providerAccountVersion: entry.providerAccountVersion,
+                  country: 'ZMB', balances, retrievedAt: entry.fetchedAt,
                 })
                 result.snapshot_persisted = true
                 result.snapshot_batch_id = snapshot?.snapshotBatchId || null
@@ -66,20 +84,24 @@ function createWalletBalanceService({ providerRegistry, snapshotRepository = nul
             }
             return result
           } catch (error) {
-            if (cached) {
-              const errorCode = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'PAWAPAY_UNAVAILABLE'
-              return { provider: 'pawapay', country: 'ZMB', balances: cached.balances, fetched_at: cached.fetchedAt, stale: true, cached: true, error_code: errorCode }
+            const lastKnown = cachedByProvider.get(selectedProviderCode) || null
+            if (lastKnown) {
+              const errorCode = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'PAYMENT_PROVIDER_UNAVAILABLE'
+              return { provider: selectedProviderCode, provider_account_id: lastKnown.providerAccountId,
+                provider_account_version: lastKnown.providerAccountVersion, country: 'ZMB', balances: lastKnown.balances,
+                fetched_at: lastKnown.fetchedAt, stale: true, cached: true, error_code: errorCode }
             }
             if (error instanceof WalletBalanceServiceError) throw error
-            const failure = new WalletBalanceServiceError(/^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'PAWAPAY_UNAVAILABLE')
+            const failure = new WalletBalanceServiceError(/^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'PAYMENT_PROVIDER_UNAVAILABLE')
             throw failure
           }
         })()
+        refreshesByProvider.set(selectedProviderCode, refreshPromise)
       }
       try {
-        return structuredClone(await refreshPromise)
+        return structuredClone(await refreshesByProvider.get(selectedProviderCode))
       } finally {
-        refreshPromise = null
+        refreshesByProvider.delete(selectedProviderCode)
       }
     },
   })

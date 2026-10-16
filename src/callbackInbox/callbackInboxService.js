@@ -9,39 +9,12 @@ class CallbackInboxError extends Error {
   }
 }
 
-function callbackSignatureKeyId(value) {
-  const match = String(value || '').match(/(?:^|;)\s*keyid="([A-Za-z0-9._:-]{1,128})"(?:;|$)/)
-  return match?.[1] || null
-}
-
-function safeHeader(headers, name) {
-  const value = headers?.[name] ?? headers?.[name.toLowerCase()]
-  return typeof value === 'string' ? value : null
-}
-
-function parseCallback(transactionType, rawBody, headers) {
-  let body
-  try { body = JSON.parse(rawBody.toString('utf8')) } catch {
-    throw new CallbackInboxError('CALLBACK_JSON_INVALID', 400)
+function createCallbackInboxService({ provider, providerCode = 'pawapay', providerAccountIdentity = null, repository } = {}) {
+  if (!provider || typeof provider.verifyCallback !== 'function' || typeof provider.normalizeCallback !== 'function') {
+    throw new TypeError('A callback provider with verification and normalization is required')
   }
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    throw new CallbackInboxError('CALLBACK_RECORD_INVALID', 400)
-  }
-  const idField = transactionType === 'deposit' ? 'depositId' : 'payoutId'
-  const transactionId = body[idField]
-  if (typeof transactionId !== 'string' || transactionId.length > 36 || !/^[A-Za-z0-9][A-Za-z0-9-]{0,35}$/.test(transactionId)) {
-    throw new CallbackInboxError('CALLBACK_TRANSACTION_ID_INVALID', 400)
-  }
-  const providerStatus = body.status
-  if (typeof providerStatus !== 'string' || providerStatus.length > 40 || !/^[A-Z][A-Z0-9_]{0,39}$/.test(providerStatus)) {
-    throw new CallbackInboxError('CALLBACK_STATUS_INVALID', 400)
-  }
-  return { transaction_id: transactionId, provider_status: providerStatus }
-}
-
-function createCallbackInboxService({ verifier, repository } = {}) {
-  if (!verifier || typeof verifier.verifyCallback !== 'function') throw new TypeError('A PawaPay callback verifier is required')
   if (!repository || typeof repository.append !== 'function') throw new TypeError('A callback inbox repository is required')
+  if (!/^[a-z][a-z0-9_]{1,31}$/.test(String(providerCode))) throw new TypeError('A valid callback provider code is required')
 
   return Object.freeze({
     async receive({ transactionType, rawBody, headers, requestContext } = {}) {
@@ -51,24 +24,45 @@ function createCallbackInboxService({ verifier, repository } = {}) {
       }
 
       // Signature verification intentionally precedes any interpretation of the body.
-      try { await verifier.verifyCallback({ requestContext: { ...requestContext, rawBody, headers } }) }
+      try { await provider.verifyCallback({ requestContext: { ...requestContext, rawBody, headers } }) }
       catch { throw new CallbackInboxError('CALLBACK_SIGNATURE_INVALID', 401) }
 
-      const record = parseCallback(transactionType, rawBody, headers)
-      const signatureDate = safeHeader(headers, 'signature-date')
-      if (!signatureDate || !Number.isFinite(Date.parse(signatureDate))) {
+      let record
+      try { record = await provider.normalizeCallback({ transactionType, rawBody, headers }) } catch {
+        throw new CallbackInboxError('CALLBACK_RECORD_INVALID', 400)
+      }
+      if (!record || typeof record !== 'object' ||
+          typeof record.transaction_id !== 'string' || record.transaction_id.length > 36 || !/^[A-Za-z0-9][A-Za-z0-9-]{0,35}$/.test(record.transaction_id)) {
+        throw new CallbackInboxError('CALLBACK_TRANSACTION_ID_INVALID', 400)
+      }
+      if (typeof record.provider_status !== 'string' || record.provider_status.length > 40 || !/^[A-Z][A-Z0-9_]{0,39}$/.test(record.provider_status)) {
+        throw new CallbackInboxError('CALLBACK_STATUS_INVALID', 400)
+      }
+      const signatureDate = record.signature_date
+      const parsedSignatureDate = Date.parse(signatureDate)
+      if (!Number.isFinite(parsedSignatureDate)) {
         throw new CallbackInboxError('CALLBACK_SIGNATURE_DATE_INVALID', 401)
+      }
+      const providerReference = record.provider_reference == null ? null : String(record.provider_reference)
+      if (providerReference !== null && (providerReference.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(providerReference))) {
+        throw new CallbackInboxError('CALLBACK_REFERENCE_INVALID', 400)
+      }
+      const signatureKeyId = record.signature_key_id == null ? null : String(record.signature_key_id)
+      if (signatureKeyId !== null && !/^[A-Za-z0-9._:-]{1,128}$/.test(signatureKeyId)) {
+        throw new CallbackInboxError('CALLBACK_SIGNATURE_KEY_ID_INVALID', 400)
       }
       const payloadSha256 = crypto.createHash('sha256').update(rawBody).digest('hex')
       const event = Object.freeze({
-        provider_code: 'pawapay',
+        provider_code: providerCode,
+        provider_account_id: providerAccountIdentity?.provider_account_id || null,
+        provider_account_version: providerAccountIdentity?.provider_account_version || null,
         transaction_type: transactionType,
         transaction_id: record.transaction_id,
         provider_status: record.provider_status,
-        provider_reference: null,
+        provider_reference: providerReference,
         payload_sha256: payloadSha256,
-        signature_key_id: callbackSignatureKeyId(safeHeader(headers, 'signature-input')),
-        signature_date: new Date(signatureDate).toISOString(),
+        signature_key_id: signatureKeyId,
+        signature_date: new Date(parsedSignatureDate).toISOString(),
       })
       try {
         const result = await repository.append(event)

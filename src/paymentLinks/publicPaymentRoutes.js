@@ -3,6 +3,7 @@ const Joi = require('joi')
 const { PaymentLinkError } = require('./paymentLinkService')
 
 const attemptSchema = Joi.object({
+  provider_code: Joi.string().pattern(/^[a-z][a-z0-9_]{1,31}$/),
   network_code: Joi.string().pattern(/^[A-Z][A-Z0-9_]{1,31}$/).required(),
   phone_number: Joi.string().pattern(/^260\d{9}$/).required(),
 }).unknown(false)

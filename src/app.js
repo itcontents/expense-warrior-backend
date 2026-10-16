@@ -24,24 +24,40 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
     next()
   })
 
-  // PawaPay signs the raw HTTP body. This route and its bounded raw parser must
-  // run before express.json consumes or transforms that body.
+  // Provider callbacks sign raw HTTP bodies. These bounded raw parsers must run
+  // before express.json consumes or transforms those bodies.
   if (callbackInboxEnabled === true) {
     if (!paymentProviders || typeof paymentProviders.get !== 'function') {
-      throw new TypeError('PawaPay callback inbox is enabled without a provider registry')
+      throw new TypeError('Provider callback inbox is enabled without a provider registry')
     }
     const { createCallbackInboxRepository } = require('./callbackInbox/callbackInboxRepository')
     const { createCallbackInboxService } = require('./callbackInbox/callbackInboxService')
-    const { createCallbackInboxRouter, CALLBACK_PATH } = require('./callbackInbox/callbackInboxRoutes')
+    const { createCallbackInboxRouter } = require('./callbackInbox/callbackInboxRoutes')
     const repository = callbackInboxRepository || createCallbackInboxRepository({ pool })
-    const verifier = typeof paymentProviders.getForOperation === 'function'
-      ? paymentProviders.getForOperation('pawapay', 'callback')
-      : paymentProviders.get('pawapay')
-    if (!verifier || typeof verifier.verifyCallback !== 'function') {
-      throw new TypeError('PawaPay callback inbox is enabled without a callback verifier')
+    const providerCodes = typeof paymentProviders.list === 'function' ? paymentProviders.list() : ['pawapay']
+    const supportedProviders = []
+    for (const providerCode of providerCodes) {
+      let provider
+      try {
+        provider = typeof paymentProviders.getForOperation === 'function'
+          ? paymentProviders.getForOperation(providerCode, 'callback')
+          : paymentProviders.get(providerCode)
+      } catch (_error) {
+        continue
+      }
+      if (!provider || typeof provider.verifyCallback !== 'function' || typeof provider.normalizeCallback !== 'function') continue
+      supportedProviders.push({ providerCode, provider })
     }
-    const callbackService = createCallbackInboxService({ verifier, repository })
-    app.use(CALLBACK_PATH, createCallbackInboxRouter({ callbackService }))
+    if (supportedProviders.length === 0) throw new TypeError('Provider callback inbox is enabled without a callback verifier')
+    for (const { providerCode, provider } of supportedProviders) {
+      let providerAccountIdentity = null
+      try { providerAccountIdentity = paymentProviders.getAccountIdentity?.(providerCode) || null }
+      catch (_error) { throw new TypeError('Provider callback inbox is enabled without account identity') }
+      const callbackService = createCallbackInboxService({ provider, providerCode, providerAccountIdentity, repository })
+      const callbackPath = paymentProviders.getCallbackPath?.(providerCode) ||
+        `/api/v1/expense-warrior/providers/${providerCode}/callbacks`
+      app.use(callbackPath, createCallbackInboxRouter({ callbackService }))
+    }
   }
 
   app.use(express.json({ limit: '1mb', strict: true }))
@@ -128,7 +144,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
     const reportService = createReportService({ pool, itcFinanceClient })
     if (phoneVault) {
       const payoutDestinationRepository = createPayoutDestinationRepository({ pool })
-      const payoutDestinationService = createPayoutDestinationService({ repository: payoutDestinationRepository, phoneVault })
+      const payoutDestinationService = createPayoutDestinationService({ repository: payoutDestinationRepository, phoneVault, providerRegistry: paymentProviders })
       app.use('/api/v1/expense-warrior', createPayoutDestinationRouter({ identityClient, destinationService: payoutDestinationService }))
     }
     app.use('/api/v1/expense-warrior', createCategoryRouter({ pool, identityClient, itcFinanceClient }))

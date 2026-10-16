@@ -21,6 +21,14 @@ const baseAttempt = {
   updated_at: '2026-10-15T12:00:00.000Z',
 }
 const baseLink = { payment_link_id: '40000000-0000-4000-8000-000000000001', amount: '125.00', currency: 'ZMW', description: 'Test' }
+const providerAccountIdentity = { provider_account_id: '80000000-0000-4000-8000-000000000001', provider_account_version: 2 }
+const acceptedDeposit = (id = attemptId) => ({ transaction_id: id, outcome: 'ACCEPTED', provider_status: 'ACCEPTED' })
+const completedDeposit = ({ id = attemptId, requestedAmount = '125.00', receivedAmount = '125.00', phone = '260763456789', network = 'MTN_MOMO_ZMB', providerReference = 'provider-ref-1' } = {}) => ({
+  transaction_id: id, outcome: 'SUCCEEDED', provider_status: 'COMPLETED',
+  evidence: { country: 'ZMB', amount: requestedAmount, requested_amount: requestedAmount,
+    received_amount: receivedAmount, currency: 'ZMW', network_code: network,
+    phone_number: phone, provider_transaction_id: providerReference },
+})
 
 test('startAttempt persists a stable attempt, sends one signed-provider operation and masks the phone', async () => {
   const calls = []
@@ -32,18 +40,17 @@ test('startAttempt persists a stable attempt, sends one signed-provider operatio
   const service = createPublicPaymentService({
     repository,
     idFactory: () => attemptId,
-    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], getAccountIdentity: () => ({
-      provider_account_id: '80000000-0000-4000-8000-000000000001', provider_account_version: 2,
-    }), get: () => ({
-      initiateDeposit: async (input) => { calls.push(input); return { depositId: attemptId, status: 'ACCEPTED' } },
+    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], getAccountIdentity: () => providerAccountIdentity, get: () => ({
+      initiateDeposit: async (input) => { calls.push(input); return acceptedDeposit() },
       getDepositStatus: async () => null,
     }) },
   })
   const result = await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
   assert.equal(calls.length, 1)
+  assert.equal(result.attempt.provider_code, 'pawapay')
   assert.equal(calls[0].amount, '125.00')
-  assert.equal(calls[0].depositId, attemptId)
-  assert.equal(calls[0].customerMessage, 'EW petty cash')
+  assert.equal(calls[0].transaction_id, attemptId)
+  assert.equal(calls[0].customer_message, 'EW petty cash')
   assert.equal(result.attempt.status, 'PENDING')
   assert.equal(result.attempt.receipt_available, false)
   assert.equal(JSON.stringify(result).includes('260763456789'), false)
@@ -61,7 +68,8 @@ test('startAttempt sends whole-number amounts as integers for a NONE-decimal net
     idFactory: () => attemptId,
     providerRegistry: {
       getActiveNetworks: async () => [noDecimalOption],
-      get: () => ({ initiateDeposit: async (input) => { calls.push(input); return { depositId: attemptId, status: 'ACCEPTED' } }, getDepositStatus: async () => null }),
+      getAccountIdentity: () => providerAccountIdentity,
+      get: () => ({ initiateDeposit: async (input) => { calls.push(input); return acceptedDeposit() }, getDepositStatus: async () => null }),
     },
   })
   await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
@@ -99,10 +107,7 @@ test('verified provider success remains pending ITC credit when the finance clie
       getPublicAttempt: async () => ({ ...baseAttempt, state: 'PENDING' }),
       updateAttempt: async (_id, update) => { updates.push(update); return { ...baseAttempt, ...update, updated_at: '2026-10-15T12:01:00.000Z' } },
     },
-    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => [{
-      depositId: attemptId, status: 'COMPLETED', requestedAmount: '125.00', depositedAmount: '125.00', currency: 'ZMW', country: 'ZMB',
-      payer: { type: 'MSISDN', address: { value: '260763456789' } }, correspondent: 'MTN_MOMO_ZMB', providerTransactionId: 'provider-ref-1',
-    }] }) },
+    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => completedDeposit() }) },
   })
   const result = await service.refreshAttempt(token, attemptId)
   assert.equal(result.status, 'VERIFYING_LEDGER')
@@ -132,10 +137,7 @@ test('confirmed PawaPay success posts the explicit link target and issues a rece
       calls.push({ payload, key })
       return { operation: { operation_id: succeeded.ledger_operation_id } }
     } },
-    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => [{
-      depositId: attemptId, status: 'COMPLETED', requestedAmount: '125.00', depositedAmount: '125.00', currency: 'ZMW', country: 'ZMB',
-      payer: { type: 'MSISDN', address: { value: '260763456789' } }, correspondent: 'MTN_MOMO_ZMB', providerTransactionId: 'provider-ref-1',
-    }] }) },
+    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => completedDeposit() }) },
   })
   const result = await service.refreshAttempt(token, attemptId)
   assert.equal(result.status, 'SUCCEEDED')
@@ -159,10 +161,7 @@ test('integer PawaPay amount evidence matches the fixed two-decimal ledger amoun
       markAttemptSucceeded: async (_id, operationId) => ({ ...attempt, state: 'SUCCEEDED', ledger_operation_id: operationId }),
     },
     itcFinanceClient: { postEarnedRevenueCollection: async () => ({ operation: { operation_id: '30000000-0000-4000-8000-000000000001' } }) },
-    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => [{
-      depositId: attemptId, status: 'COMPLETED', requestedAmount: '125', depositedAmount: '125', currency: 'ZMW', country: 'ZMB',
-      payer: { type: 'MSISDN', address: { value: '260763456789' } }, correspondent: 'MTN_MOMO_ZMB', providerTransactionId: 'provider-ref-integer',
-    }] }) },
+    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => completedDeposit({ requestedAmount: '125', receivedAmount: '125', providerReference: 'provider-ref-integer' }) }) },
   })
   const result = await service.refreshAttempt(token, attemptId)
   assert.equal(update.verified, true)
@@ -208,10 +207,7 @@ test('provider success with mismatched destination remains unknown and uncredite
       getPublicAttempt: async () => ({ ...baseAttempt, state: 'PENDING' }),
       updateAttempt: async (_id, update) => { updates.push(update); return { ...baseAttempt, ...update } },
     },
-    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => [{
-      depositId: attemptId, status: 'COMPLETED', requestedAmount: '125.00', depositedAmount: '125.00', currency: 'ZMW', country: 'ZMB',
-      payer: { type: 'MSISDN', address: { value: '260953456700' } }, correspondent: 'MTN_MOMO_ZMB',
-    }] }) },
+    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => completedDeposit({ phone: '260953456700', providerReference: null }) }) },
   })
   const result = await service.refreshAttempt(token, attemptId)
   assert.equal(result.status, 'UNKNOWN')
@@ -236,8 +232,24 @@ test('getLink advertises active provider options, including amount and authoriza
   })
   assert.deepEqual(await service.getLink(token), {
     payment_link_id: 'link-1', description: 'Invoice', amount: '125.00', currency: 'ZMW',
-    available_networks: [{ code: 'MTN_MOMO_ZMB', label: 'MTN MoMo', min_amount: '1', max_amount: '5000', decimals_in_amount: 'TWO_PLACES', auth_type: 'PROVIDER_AUTH', pin_prompt: 'AUTOMATIC' }],
+    available_networks: [{ provider_code: 'pawapay', code: 'MTN_MOMO_ZMB', label: 'MTN MoMo', min_amount: '1', max_amount: '5000', decimals_in_amount: 'TWO_PLACES', auth_type: 'PROVIDER_AUTH', pin_prompt: 'AUTOMATIC' }],
   })
+})
+
+test('getLink keeps same-network options from different provider add-ons distinct', async () => {
+  const service = createPublicPaymentService({
+    repository: { getPublicLink: async () => ({ ...baseLink, amount: '125.00' }) },
+    providerRegistry: { getActiveNetworks: async () => [
+      { ...mtnDepositOption, provider_label: 'PawaPay' },
+      { ...mtnDepositOption, provider_code: 'another_provider', provider_label: 'Another Provider' },
+    ] },
+  })
+
+  const link = await service.getLink(token)
+  assert.deepEqual(link.available_networks.map(({ provider_code, provider_label, code }) => ({ provider_code, provider_label, code })), [
+    { provider_code: 'pawapay', provider_label: 'PawaPay', code: 'MTN_MOMO_ZMB' },
+    { provider_code: 'another_provider', provider_label: 'Another Provider', code: 'MTN_MOMO_ZMB' },
+  ])
 })
 
 test('getLink hides configured networks whose amount rules cannot accept the fixed link amount', async () => {
@@ -269,7 +281,7 @@ test('A/R attempts reserve the full delivered invoice before PawaPay and post wi
     providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], getAccountIdentity: () => ({
       provider_account_id: '80000000-0000-4000-8000-000000000001', provider_account_version: 2,
     }), get: () => ({
-      initiateDeposit: async (input) => { calls.push({ type: 'provider', input }); return { depositId: attemptId, status: 'ACCEPTED' } },
+      initiateDeposit: async (input) => { calls.push({ type: 'provider', input }); return acceptedDeposit() },
       getDepositStatus: async () => null,
     }) },
   })
@@ -325,10 +337,7 @@ test('A/R collection posts through ITC with its reservation and closes the attem
       calls.push({ type: 'post', payload, key })
       return { operation: { operation_id: success.ledger_operation_id } }
     } },
-    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => [{
-      depositId: attemptId, status: 'COMPLETED', requestedAmount: '125.00', depositedAmount: '125.00', currency: 'ZMW', country: 'ZMB',
-      payer: { type: 'MSISDN', address: { value: '260763456789' } }, correspondent: 'MTN_MOMO_ZMB', providerTransactionId: 'provider-ref-1',
-    }] }) },
+    providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => completedDeposit() }) },
   })
   const result = await service.refreshAttempt(token, attemptId)
   assert.equal(result.status, 'SUCCEEDED')

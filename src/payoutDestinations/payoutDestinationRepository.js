@@ -12,6 +12,7 @@ function publicFields(row) {
   return {
     destination_id: row.destination_id,
     staff_customer_id: row.staff_customer_id,
+    provider_code: row.provider_code || 'pawapay',
     network_code: row.network_code,
     phone_last4: row.phone_last4,
     created_at: row.created_at,
@@ -24,20 +25,20 @@ function createPayoutDestinationRepository({ pool } = {}) {
     throw new TypeError('A PostgreSQL pool is required')
   }
   return Object.freeze({
-    async assign({ actorId, staffId, networkCode, encrypted, fingerprint, last4 }) {
+    async assign({ actorId, staffId, providerCode = 'pawapay', networkCode, encrypted, fingerprint, last4 }) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`ew-payout-destination:${staffId}`])
         const currentResult = await client.query(`
-          SELECT destination_id, staff_customer_id, network_code, phone_ciphertext, encryption_key_id,
+          SELECT destination_id, staff_customer_id, provider_code, network_code, phone_ciphertext, encryption_key_id,
                  phone_fingerprint, phone_last4, assigned_by_customer_id, created_at, superseded_at
             FROM staff_payout_destinations
            WHERE staff_customer_id = $1 AND superseded_at IS NULL
            FOR UPDATE
         `, [staffId])
         const current = currentResult.rows[0] || null
-        if (current && current.network_code === networkCode && current.phone_fingerprint === fingerprint) {
+        if (current && (current.provider_code || 'pawapay') === providerCode && current.network_code === networkCode && current.phone_fingerprint === fingerprint) {
           await client.query('COMMIT')
           return { destination: publicFields(current), changed: false }
         }
@@ -46,16 +47,16 @@ function createPayoutDestinationRepository({ pool } = {}) {
         }
         const createdResult = await client.query(`
           INSERT INTO staff_payout_destinations
-            (staff_customer_id, network_code, phone_ciphertext, encryption_key_id, phone_fingerprint,
+            (staff_customer_id, provider_code, network_code, phone_ciphertext, encryption_key_id, phone_fingerprint,
              phone_last4, assigned_by_customer_id)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-          RETURNING destination_id, staff_customer_id, network_code, phone_last4, created_at, superseded_at
-        `, [staffId, networkCode, encrypted.ciphertext, encrypted.keyId, fingerprint, last4, actorId])
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          RETURNING destination_id, staff_customer_id, provider_code, network_code, phone_last4, created_at, superseded_at
+        `, [staffId, providerCode, networkCode, encrypted.ciphertext, encrypted.keyId, fingerprint, last4, actorId])
         const created = createdResult.rows[0]
         await client.query(`
           INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
           VALUES ($1, 'payout_destination.assigned', 'staff_payout_destination', $2, $3::jsonb)
-        `, [actorId, created.destination_id, JSON.stringify({ staff_customer_id: staffId, network_code: networkCode, phone_last4: last4 })])
+        `, [actorId, created.destination_id, JSON.stringify({ staff_customer_id: staffId, provider_code: providerCode, network_code: networkCode, phone_last4: last4 })])
         await client.query('COMMIT')
         return { destination: publicFields(created), changed: true }
       } catch (error) {
@@ -67,7 +68,7 @@ function createPayoutDestinationRepository({ pool } = {}) {
     },
     async listCurrent() {
       const result = await pool.query(`
-        SELECT destination_id, staff_customer_id, network_code, phone_last4, created_at, superseded_at
+        SELECT destination_id, staff_customer_id, provider_code, network_code, phone_last4, created_at, superseded_at
           FROM staff_payout_destinations
          WHERE superseded_at IS NULL
          ORDER BY created_at DESC, destination_id DESC
@@ -77,7 +78,7 @@ function createPayoutDestinationRepository({ pool } = {}) {
     },
     async getCurrentForStaff(staffId) {
       const result = await pool.query(`
-        SELECT destination_id, staff_customer_id, network_code, phone_last4, created_at, superseded_at
+        SELECT destination_id, staff_customer_id, provider_code, network_code, phone_last4, created_at, superseded_at
           FROM staff_payout_destinations
          WHERE staff_customer_id = $1 AND superseded_at IS NULL
          LIMIT 1

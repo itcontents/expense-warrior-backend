@@ -10,7 +10,8 @@ test('provider registry exposes deposit capabilities across lazy registered adap
   const registry = createProviderRegistry({
     additionalProviders: {
       airtel_direct: {
-        create: () => { created += 1; return { initiateDeposit() {} } },
+        contractVersion: 1,
+        create: () => { created += 1; return { contractVersion: 1, initiateDeposit() {} } },
         getNetworks: (operation) => operation === 'deposit' ? [airtelNetwork] : [],
       },
     },
@@ -48,6 +49,9 @@ test('provider registry exposes a validated configured account identity for inte
   })
   assert.throws(() => createProviderRegistry({ pawaPayConfig: {} }).getAccountIdentity('pawapay'), (error) =>
     error instanceof ProviderRegistryError && error.code === 'PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE')
+  assert.throws(() => registry.getForOperation('pawapay', 'deposit', {
+    provider_account_id: '70000000-0000-4000-8000-000000000001', provider_account_version: 3,
+  }), (error) => error instanceof ProviderRegistryError && error.code === 'PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE')
 })
 
 test('active payment options are resolved through the provider adapter', async () => {
@@ -79,7 +83,8 @@ test('provider registry rejects malformed operation capability metadata', () => 
   const registry = createProviderRegistry({
     additionalProviders: {
       broken_adapter: {
-        create: () => ({ initiateDeposit() {}, getDepositStatus() {} }),
+        contractVersion: 1,
+        create: () => ({ contractVersion: 1, initiateDeposit() {}, getDepositStatus() {} }),
         getNetworks: () => ({ code: 'AIRTEL_OAPI_ZMB' }),
       },
     },
@@ -89,7 +94,7 @@ test('provider registry rejects malformed operation capability metadata', () => 
 })
 
 test('provider registry rejects unsafe, duplicate, and incomplete add-on definitions', () => {
-  const validDefinition = { create: () => ({}), getNetworks: () => [] }
+  const validDefinition = { contractVersion: 1, create: () => ({}), getNetworks: () => [] }
   for (const [providerCode, definition] of [
     ['PawaPay', validDefinition],
     ['pawapay', validDefinition],
@@ -108,7 +113,8 @@ test('provider registry rejects lookups for an unregistered provider', () => {
 test('provider registry requires both refund initiation and refund status methods', () => {
   const complete = createProviderRegistry({ additionalProviders: {
     refund_addon: {
-      create: () => ({ initiateRefund() {}, getRefundStatus() {} }),
+      contractVersion: 1,
+      create: () => ({ contractVersion: 1, initiateRefund() {}, getRefundStatus() {} }),
       getNetworks: () => [],
     },
   } })
@@ -116,7 +122,8 @@ test('provider registry requires both refund initiation and refund status method
   assert.equal(typeof complete.getForOperation('refund_addon', 'refund').getRefundStatus, 'function')
   const incomplete = createProviderRegistry({ additionalProviders: {
     refund_addon: {
-      create: () => ({ initiateRefund() {} }),
+      contractVersion: 1,
+      create: () => ({ contractVersion: 1, initiateRefund() {} }),
       getNetworks: () => [],
     },
   } })

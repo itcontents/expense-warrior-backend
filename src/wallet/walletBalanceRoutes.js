@@ -25,8 +25,12 @@ function createWalletBalanceRouter({ identityClient, walletBalanceService, itcFi
     if (req.query.refresh !== undefined && req.query.refresh !== 'true' && req.query.refresh !== 'false') {
       return res.status(400).json({ error: { code: 'INVALID_FILTER', message: 'The refresh option must be true or false' } })
     }
+    const providerCode = req.query.provider_code === undefined ? 'pawapay' : String(req.query.provider_code).trim().toLowerCase()
+    if (!/^[a-z][a-z0-9_]{1,31}$/.test(providerCode)) {
+      return res.status(400).json({ error: { code: 'INVALID_FILTER', message: 'The provider filter is invalid' } })
+    }
     try {
-      const result = await walletBalanceService.getBalance({ forceRefresh: req.query.refresh === 'true' })
+      const result = await walletBalanceService.getBalance({ providerCode, forceRefresh: req.query.refresh === 'true' })
       res.set('Cache-Control', 'private, no-store')
       res.set('Vary', 'Cookie')
       return res.status(200).json({ data: result })
@@ -43,14 +47,17 @@ function createWalletBalanceRouter({ identityClient, walletBalanceService, itcFi
     if (String(actor.role || '').toLowerCase() !== 'admin') {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Administrator access is required' } })
     }
-    const schema = Joi.object({ limit: Joi.number().integer().min(1).max(100).default(50) }).unknown(false)
+    const schema = Joi.object({
+      limit: Joi.number().integer().min(1).max(100).default(50),
+      provider_code: Joi.string().pattern(/^[a-z][a-z0-9_]{1,31}$/).default('pawapay'),
+    }).unknown(false)
     const { value, error } = schema.validate(req.query, { abortEarly: false, convert: true })
     if (error) return res.status(400).json({ error: { code: 'INVALID_FILTER', message: 'Snapshot history filters are invalid' } })
     if (!snapshotRepository || typeof snapshotRepository.listRecent !== 'function') {
       return res.status(503).json({ error: { code: 'PROVIDER_BALANCE_HISTORY_UNAVAILABLE', message: 'Provider balance history is temporarily unavailable' } })
     }
     try {
-      const snapshots = await snapshotRepository.listRecent({ limit: value.limit })
+      const snapshots = await snapshotRepository.listRecent({ limit: value.limit, providerCode: value.provider_code })
       res.set('Cache-Control', 'private, no-store')
       res.set('Vary', 'Cookie')
       return res.status(200).json({ data: { snapshots } })

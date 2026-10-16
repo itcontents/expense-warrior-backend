@@ -89,3 +89,31 @@ test('getBalance coalesces concurrent cache misses into one provider read', asyn
   assert.equal(results.length, 3)
   assert.ok(results.every((result) => result.balances[0].balance === '120.00'))
 })
+
+test('balance cache and append-only snapshots are scoped to provider account identity', async () => {
+  const snapshots = []
+  const providers = {
+    get: () => assert.fail('operation lookup should be used'),
+    getForOperation: (code, operation) => {
+      assert.equal(operation, 'balance')
+      return { getWalletBalances: async () => ({ balances: [{ country: 'ZMB', currency: 'ZMW', balance: code === 'pawapay' ? '10.00' : '20.00', provider: '' }] }) }
+    },
+    getAccountIdentity: (code) => ({ provider_account_id: code === 'pawapay' ? 'a66ab1fc-89e0-4ff8-92b4-d41380bded9a' : 'b66ab1fc-89e0-4ff8-92b4-d41380bded9a', provider_account_version: 1 }),
+  }
+  const service = createWalletBalanceService({ providerRegistry: providers, snapshotRepository: { recordBatch: async (input) => {
+    snapshots.push(input)
+    return { snapshotBatchId: `${snapshots.length}` }
+  } } })
+
+  const primary = await service.getBalance()
+  const addon = await service.getBalance({ providerCode: 'another_provider' })
+  const cachedPrimary = await service.getBalance()
+
+  assert.equal(primary.provider, 'pawapay')
+  assert.equal(primary.provider_account_version, 1)
+  assert.equal(addon.provider, 'another_provider')
+  assert.equal(addon.balances[0].balance, '20.00')
+  assert.equal(cachedPrimary.cached, true)
+  assert.equal(snapshots.length, 2)
+  assert.deepEqual(snapshots.map(({ provider, providerAccountVersion }) => [provider, providerAccountVersion]), [['pawapay', 1], ['another_provider', 1]])
+})

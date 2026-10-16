@@ -16,7 +16,10 @@ function publicPayout(row) {
     payout_attempt_id: row.payout_attempt_id,
     request_id: row.request_id,
     provider_code: row.provider_code,
+    provider_account_id: row.provider_account_id || null,
+    provider_account_version: row.provider_account_version || null,
     network_code: row.network_code,
+    network_label: row.provider_network_label || null,
     amount: row.amount,
     currency: row.currency,
     client_reference_id: row.client_reference_id,
@@ -40,7 +43,8 @@ async function lockRequest(client, requestId) {
            request.finance_operation_id, request.finance_idempotency_key, request.finance_hold_id,
            request.finance_reservation_state, request.finance_error_code,
            request.finance_expense_category_code, request.finance_expense_account_code,
-           request.payout_network_code, request.payout_phone_last4,
+           request.payout_provider_code, request.payout_network_code, request.payout_phone_last4,
+           request.payout_provider_account_id, request.payout_provider_account_version,
            COALESCE(subcategory.itc_expense_category_code, category.itc_expense_category_code) AS mapped_itc_expense_category_code
       FROM expense_requests request
       JOIN expense_categories category ON category.category_id = request.category_id
@@ -53,7 +57,8 @@ async function lockRequest(client, requestId) {
 
 async function loadPayout(client, requestId, { lock = false } = {}) {
   const result = await client.query(`
-    SELECT payout_id, payout_attempt_id, request_id, provider_code, network_code,
+    SELECT payout_id, payout_attempt_id, request_id, provider_code, provider_account_id, provider_account_version,
+           network_code, provider_network_label,
            amount::text AS amount, currency, client_reference_id, state, provider_status,
            provider_transaction_reference, error_code, consume_operation_id, consume_state,
            release_operation_id, release_idempotency_key, release_state, release_error_code,
@@ -72,7 +77,8 @@ function assertAdminCanAct(request, actor) {
   }
 }
 
-async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit = null, idFactory }) {
+async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit = null, idFactory,
+  providerCode = null, providerAccountId = null, providerAccountVersion = null, providerNetworkLabel = null }) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -116,6 +122,20 @@ async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit 
           (expenseAccountCode !== null && !/^\d{4}$/.test(String(expenseAccountCode)))) {
         throw new StaffPayoutRepositoryError('EXPENSE_CATEGORY_ACCOUNTING_MAP_REQUIRED', 422)
       }
+      const selectedProviderCode = providerCode || request.payout_provider_code || 'pawapay'
+      if (request.payout_provider_code && selectedProviderCode !== request.payout_provider_code) {
+        throw new StaffPayoutRepositoryError('PAYOUT_PROVIDER_SNAPSHOT_MISMATCH', 409)
+      }
+      if (!/^[a-z][a-z0-9_]{1,31}$/.test(String(selectedProviderCode)) ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(providerAccountId || '')) ||
+          !Number.isSafeInteger(providerAccountVersion) || providerAccountVersion <= 0) {
+        throw new StaffPayoutRepositoryError('PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE', 503)
+      }
+      if (request.payout_provider_account_id &&
+          (String(request.payout_provider_account_id).toLowerCase() !== String(providerAccountId).toLowerCase() ||
+           Number(request.payout_provider_account_version) !== providerAccountVersion)) {
+        throw new StaffPayoutRepositoryError('PAYOUT_PROVIDER_ACCOUNT_SNAPSHOT_MISMATCH', 409)
+      }
       const operationId = request.finance_operation_id || idFactory()
       const idempotencyKey = request.finance_idempotency_key || `ewmr-${String(requestId).toLowerCase()}`
       await client.query(`
@@ -123,9 +143,12 @@ async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit 
            SET finance_operation_id = $2, finance_idempotency_key = $3,
                finance_reservation_state = 'PENDING', finance_error_code = NULL,
                finance_expense_category_code = $4, finance_expense_account_code = $5,
+               payout_provider_account_id = COALESCE(payout_provider_account_id, $6),
+               payout_provider_account_version = COALESCE(payout_provider_account_version, $7),
                updated_at = transaction_timestamp()
          WHERE request_id = $1
-      `, [requestId, operationId, idempotencyKey, expenseCategoryCode, expenseAccountCode])
+      `, [requestId, operationId, idempotencyKey, expenseCategoryCode, expenseAccountCode,
+        providerAccountId, providerAccountVersion])
       await client.query(`
         INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, request_id, metadata)
         VALUES ($1, 'request.admin.reservation_started', 'expense_request', $2, $3, $4::jsonb)
@@ -139,6 +162,7 @@ async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit 
         reservation: {
           operationId, idempotencyKey, expenseCategoryCode, expenseAccountCode,
           amount: request.amount, currency: request.currency, requesterCustomerId: request.requester_customer_id,
+          providerCode: selectedProviderCode, providerAccountId, providerAccountVersion,
         },
       }
     }
@@ -148,16 +172,22 @@ async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit 
     const payoutAttemptId = idFactory()
     const consumeOperationId = idFactory()
     const clientReferenceId = `EW-REQ-${String(requestId).toLowerCase()}`
+    const selectedProviderCode = providerCode || request.payout_provider_code || 'pawapay'
+    if (request.payout_provider_code && selectedProviderCode !== request.payout_provider_code) {
+      throw new StaffPayoutRepositoryError('PAYOUT_PROVIDER_SNAPSHOT_MISMATCH', 409)
+    }
     const created = await client.query(`
       INSERT INTO request_payout_attempts (
-        payout_id, payout_attempt_id, request_id, provider_code, network_code, amount,
-        currency, client_reference_id, state, consume_operation_id
-      ) VALUES ($1, $2, $3, 'pawapay', $4, $5, $6, $7, 'SUBMITTING', $8)
-      RETURNING payout_id, payout_attempt_id, request_id, provider_code, network_code,
+        payout_id, payout_attempt_id, request_id, provider_code, provider_account_id, provider_account_version,
+        network_code, provider_network_label, amount, currency, client_reference_id, state, consume_operation_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'SUBMITTING', $12)
+      RETURNING payout_id, payout_attempt_id, request_id, provider_code, provider_account_id, provider_account_version,
+                network_code, provider_network_label,
                 amount::text AS amount, currency, client_reference_id, state, provider_status,
                 provider_transaction_reference, error_code, consume_operation_id, consume_state,
                 release_state, created_at, updated_at, verified_at
-    `, [payoutId, payoutAttemptId, requestId, request.payout_network_code, request.amount, request.currency, clientReferenceId, consumeOperationId])
+    `, [payoutId, payoutAttemptId, requestId, selectedProviderCode, providerAccountId, providerAccountVersion,
+      request.payout_network_code, providerNetworkLabel, request.amount, request.currency, clientReferenceId, consumeOperationId])
     await client.query(`
       INSERT INTO request_decisions (request_id, stage, action, actor_customer_id, reason)
       VALUES ($1, 'admin', 'approve', $2, NULL)
@@ -316,7 +346,8 @@ async function updateAttempt({ pool, actorId, requestId, payoutId, state, provid
              provider_transaction_reference = COALESCE($5, provider_transaction_reference),
              error_code = $6, updated_at = transaction_timestamp()
        WHERE request_id = $1 AND payout_id = $2 AND state NOT IN ('PAID','FAILED')
-       RETURNING payout_id, payout_attempt_id, request_id, provider_code, network_code,
+       RETURNING payout_id, payout_attempt_id, request_id, provider_code, provider_account_id, provider_account_version,
+                 network_code, provider_network_label,
                  amount::text AS amount, currency, client_reference_id, state, provider_status,
                  provider_transaction_reference, error_code, consume_operation_id, consume_state,
                  release_state, created_at, updated_at, verified_at
@@ -523,7 +554,8 @@ async function listRecovery({ pool, limit = 50, offset = 0 }) {
     SELECT request.request_id, request.requester_customer_id, request.amount::text AS amount,
            request.currency, request.status, request.reason, request.created_at AS submitted_at,
            category.name AS category_name, subcategory.name AS subcategory_name,
-           payout.payout_id, payout.payout_attempt_id, payout.provider_code, payout.network_code,
+           payout.payout_id, payout.payout_attempt_id, payout.provider_code,
+           payout.provider_account_id, payout.provider_account_version, payout.network_code, payout.provider_network_label,
            payout.state AS payout_state, payout.provider_status, payout.provider_transaction_reference,
            payout.error_code AS payout_error_code, payout.release_state,
            payout.release_error_code, payout.created_at AS payout_created_at,
@@ -543,6 +575,17 @@ async function listRecovery({ pool, limit = 50, offset = 0 }) {
 function createStaffPayoutRepository({ pool, idFactory = randomUUID } = {}) {
   if (!pool || typeof pool.query !== 'function' || typeof pool.connect !== 'function') throw new TypeError('A PostgreSQL pool is required')
   return Object.freeze({
+    async getPayoutProviderSelection(requestId) {
+      const result = await pool.query(`
+        SELECT payout_provider_code AS provider_code, payout_network_code AS network_code,
+               payout_provider_account_id AS provider_account_id,
+               payout_provider_account_version AS provider_account_version
+          FROM expense_requests
+         WHERE request_id = $1
+         LIMIT 1
+      `, [requestId])
+      return result.rows[0] || null
+    },
     prepareFinalApproval: (input) => prepareFinalApproval({ pool, idFactory, ...input }),
     completeAdminReservation: (input) => completeAdminReservation({ pool, ...input }),
     setAdminReservationAccountingSnapshot: (input) => setAdminReservationAccountingSnapshot({ pool, ...input }),
