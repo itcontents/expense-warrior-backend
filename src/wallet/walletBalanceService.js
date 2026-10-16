@@ -1,5 +1,6 @@
 const BALANCE = /^(?:0|[1-9]\d{0,11})(?:\.\d{1,4})?$/
 const PROVIDER_CODE = /^[A-Z0-9_]{1,40}$/
+const PROVIDER_ACCOUNT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 class WalletBalanceServiceError extends Error {
   constructor(code, statusCode = 503) {
@@ -42,7 +43,8 @@ function createWalletBalanceService({ providerRegistry, snapshotRepository = nul
       const currentTime = now()
       if (cached && !forceRefresh && currentTime - cached.fetchedAtMs < ttlMs) {
         return { provider: selectedProviderCode, provider_account_id: cached.providerAccountId, provider_account_version: cached.providerAccountVersion,
-          country: 'ZMB', balances: structuredClone(cached.balances), fetched_at: cached.fetchedAt, stale: false, cached: true }
+          country: 'ZMB', balances: structuredClone(cached.balances), fetched_at: cached.fetchedAt, stale: false, cached: true,
+          ...(cached.snapshotErrorCode ? { snapshot_persisted: false, snapshot_error_code: cached.snapshotErrorCode } : {}) }
       }
       if (!refreshesByProvider.has(selectedProviderCode)) {
         const refreshPromise = (async () => {
@@ -54,32 +56,47 @@ function createWalletBalanceService({ providerRegistry, snapshotRepository = nul
             const response = await provider.getWalletBalances({ country: 'ZMB' })
             const balances = normalizeBalances(response)
             let accountIdentity = null
-            try { accountIdentity = providerRegistry.getAccountIdentity?.(selectedProviderCode) || null } catch (_error) {
-              throw new WalletBalanceServiceError('PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE')
-            }
+            try { accountIdentity = providerRegistry.getAccountIdentity?.(selectedProviderCode) || null } catch (_error) {}
+            const providerAccountId = PROVIDER_ACCOUNT_ID.test(String(accountIdentity?.provider_account_id || ''))
+              ? String(accountIdentity.provider_account_id).toLowerCase()
+              : null
+            const providerAccountVersion = Number.isSafeInteger(Number(accountIdentity?.provider_account_version)) &&
+              Number(accountIdentity?.provider_account_version) > 0
+              ? Number(accountIdentity.provider_account_version)
+              : null
+            const hasAccountIdentity = Boolean(providerAccountId && providerAccountVersion)
             const fetchedAtMs = now()
             const entry = {
               balances, fetchedAtMs, fetchedAt: new Date(fetchedAtMs).toISOString(),
-              providerAccountId: accountIdentity?.provider_account_id || null,
-              providerAccountVersion: accountIdentity?.provider_account_version || null,
+              providerAccountId: hasAccountIdentity ? providerAccountId : null,
+              providerAccountVersion: hasAccountIdentity ? providerAccountVersion : null,
+              snapshotErrorCode: snapshotRepository && !hasAccountIdentity
+                ? 'PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE'
+                : null,
             }
             cachedByProvider.set(selectedProviderCode, entry)
             const result = { provider: selectedProviderCode, provider_account_id: entry.providerAccountId,
               provider_account_version: entry.providerAccountVersion, country: 'ZMB', balances, fetched_at: entry.fetchedAt, stale: false, cached: false }
             if (snapshotRepository) {
-              try {
-                const snapshot = await snapshotRepository.recordBatch({
-                  provider: selectedProviderCode, providerAccountId: entry.providerAccountId,
-                  providerAccountVersion: entry.providerAccountVersion,
-                  country: 'ZMB', balances, retrievedAt: entry.fetchedAt,
-                })
-                result.snapshot_persisted = true
-                result.snapshot_batch_id = snapshot?.snapshotBatchId || null
-              } catch (error) {
+              if (!hasAccountIdentity) {
                 result.snapshot_persisted = false
-                result.snapshot_error_code = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || ''))
-                  ? error.code
-                  : 'PROVIDER_BALANCE_SNAPSHOT_FAILED'
+                result.snapshot_error_code = entry.snapshotErrorCode
+              } else {
+                try {
+                  const snapshot = await snapshotRepository.recordBatch({
+                    provider: selectedProviderCode, providerAccountId: entry.providerAccountId,
+                    providerAccountVersion: entry.providerAccountVersion,
+                    country: 'ZMB', balances, retrievedAt: entry.fetchedAt,
+                  })
+                  result.snapshot_persisted = true
+                  result.snapshot_batch_id = snapshot?.snapshotBatchId || null
+                } catch (error) {
+                  result.snapshot_persisted = false
+                  result.snapshot_error_code = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || ''))
+                    ? error.code
+                    : 'PROVIDER_BALANCE_SNAPSHOT_FAILED'
+                  entry.snapshotErrorCode = result.snapshot_error_code
+                }
               }
             }
             return result

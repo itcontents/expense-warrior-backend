@@ -7,7 +7,10 @@ test('getBalance caches provider wallet balances for a bounded interval and supp
   let calls = 0
   const snapshots = []
   const service = createWalletBalanceService({
-    providerRegistry: { get: () => ({ getWalletBalances: async () => ({ balances: [{ country: 'ZMB', currency: 'ZMW', balance: `${++calls}20.00`, provider: '' }] }) }) },
+    providerRegistry: {
+      get: () => ({ getWalletBalances: async () => ({ balances: [{ country: 'ZMB', currency: 'ZMW', balance: `${++calls}20.00`, provider: '' }] }) }),
+      getAccountIdentity: () => ({ provider_account_id: '01234567-89ab-4cde-8fab-0123456789ab', provider_account_version: 1 }),
+    },
     snapshotRepository: { recordBatch: async (input) => { snapshots.push(input); return { snapshotBatchId: `batch-${snapshots.length}` } } },
     now: () => now,
     ttlMs: 30000,
@@ -32,7 +35,10 @@ test('getBalance caches provider wallet balances for a bounded interval and supp
 
 test('a snapshot persistence error does not replace a fresh verified provider balance with stale or fabricated data', async () => {
   const service = createWalletBalanceService({
-    providerRegistry: { get: () => ({ getWalletBalances: async () => ({ balances: [{ country: 'ZMB', currency: 'ZMW', balance: '120.00', provider: 'MTN_MOMO_ZMB' }] }) }) },
+    providerRegistry: {
+      get: () => ({ getWalletBalances: async () => ({ balances: [{ country: 'ZMB', currency: 'ZMW', balance: '120.00', provider: 'MTN_MOMO_ZMB' }] }) }),
+      getAccountIdentity: () => ({ provider_account_id: '01234567-89ab-4cde-8fab-0123456789ab', provider_account_version: 1 }),
+    },
     snapshotRepository: { recordBatch: async () => { throw Object.assign(new Error('db unavailable'), { code: 'DATABASE_UNAVAILABLE' }) } },
   })
   const result = await service.getBalance({ forceRefresh: true })
@@ -40,6 +46,43 @@ test('a snapshot persistence error does not replace a fresh verified provider ba
   assert.equal(result.stale, false)
   assert.equal(result.snapshot_persisted, false)
   assert.equal(result.snapshot_error_code, 'DATABASE_UNAVAILABLE')
+})
+
+test('provider balance stays visible when the ITC account mapping is missing and is not saved as an unidentified snapshot', async () => {
+  let calls = 0
+  const snapshots = []
+  const providerRegistry = {
+    get: () => assert.fail('operation lookup should be used'),
+    getForOperation: (_code, operation) => {
+      assert.equal(operation, 'balance')
+      return { getWalletBalances: async () => {
+        calls++
+        return { balances: [{ country: 'ZMB', currency: 'ZMW', balance: '120.00', provider: '' }] }
+      } }
+    },
+    getAccountIdentity: () => {
+      throw Object.assign(new Error('mapping unavailable'), { code: 'PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE' })
+    },
+  }
+  const service = createWalletBalanceService({
+    providerRegistry,
+    snapshotRepository: { recordBatch: async (input) => { snapshots.push(input); return { snapshotBatchId: 'should-not-be-used' } } },
+  })
+
+  const result = await service.getBalance({ forceRefresh: true })
+
+  assert.equal(calls, 1)
+  assert.equal(result.balances[0].balance, '120.00')
+  assert.equal(result.provider_account_id, null)
+  assert.equal(result.provider_account_version, null)
+  assert.equal(result.snapshot_persisted, false)
+  assert.equal(result.snapshot_error_code, 'PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE')
+  assert.equal(snapshots.length, 0)
+  const cached = await service.getBalance()
+  assert.equal(cached.cached, true)
+  assert.equal(cached.snapshot_persisted, false)
+  assert.equal(cached.snapshot_error_code, 'PAYMENT_PROVIDER_ACCOUNT_IDENTITY_UNAVAILABLE')
+  assert.equal(calls, 1)
 })
 
 test('getBalance serves a clearly stale last known response when provider is unavailable', async () => {
