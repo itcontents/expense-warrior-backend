@@ -339,7 +339,7 @@ function retryHarness({ reserveError, reservePatch = {}, completionWinner = true
     requesterCustomerId: request.requester_customer_id, providerCode: 'pawapay', providerAccountId, providerAccountVersion }
   h.repository.preparePayoutRetry = async (input) => {
     h.calls.push(['preparePayoutRetry', input])
-    return { request: retryRequest, payout, reservation, requiresReservation: true, shouldInitiate: false }
+    return { request: retryRequest, payout, reservation, reservationActorCustomerId: actor.customerId, requiresReservation: true, shouldInitiate: false }
   }
   let claimed = false
   h.repository.completeRetryReservation = async (input) => {
@@ -596,4 +596,59 @@ test('retry service cannot self-review through the locked repository authorizati
   h.repository.preparePayoutRetry = createStaffPayoutRepository({ pool: { query: client.query, connect: async () => client } }).preparePayoutRetry
   await assert.rejects(h.service.retry(actor, requestId), { code: 'SELF_REVIEW_PROHIBITED' })
   assert.equal(h.calls.length, 0)
+})
+
+
+for (const [name, changeActor, changeCase] of [['different admin', true, false], ['different UUID casing', false, true], ['different admin and UUID casing', true, true]]) {
+  test(`unknown retry reservation resolves its exact ITC fingerprint with ${name}`, async () => {
+    const canonicalId = 'abcdef01-0000-4000-8000-000000000002'
+    const h = retryHarness({ reservePatch: { request_id: canonicalId } })
+    const basePrepare = h.repository.preparePayoutRetry
+    h.repository.preparePayoutRetry = async (input) => {
+      const prepared = await basePrepare(input)
+      return { ...prepared, request: { ...prepared.request, request_id: canonicalId },
+        payout: { ...prepared.payout, request_id: canonicalId } }
+    }
+    const baseComplete = h.repository.completeRetryReservation
+    h.repository.completeRetryReservation = async (input) => {
+      const completed = await baseComplete(input)
+      return { ...completed, request: { ...completed.request, request_id: canonicalId } }
+    }
+    let committedPayload
+    const baseReserve = h.financeClient.reserve
+    h.financeClient.reserve = async (...args) => {
+      const result = await baseReserve(...args)
+      if (!committedPayload) {
+        committedPayload = structuredClone(args[0])
+        throw Object.assign(Error('response lost after ITC committed'), { code: 'ITC_FINANCE_UNAVAILABLE' })
+      }
+      // Model ITC fingerprint enforcement, including actor and purpose.
+      if (JSON.stringify(args[0]) !== JSON.stringify(committedPayload)) {
+        throw Object.assign(Error('fingerprint differs'), { code: 'IDEMPOTENCY_CONFLICT' })
+      }
+      return result
+    }
+    const first = await h.service.retry(actor, canonicalId)
+    assert.equal(first.errorCode, 'ITC_FINANCE_UNAVAILABLE')
+    const resumingAdmin = changeActor ? { ...actor, customerId: '11000000-0000-4000-8000-000000000001' } : actor
+    const resumed = await h.service.retry(resumingAdmin, changeCase ? canonicalId.toUpperCase() : canonicalId)
+    assert.equal(resumed.errorCode, undefined)
+    assert.equal(h.calls.filter(([name]) => name === 'initiatePayout').length, 1)
+    const reserves = h.calls.filter(([name]) => name === 'reserve')
+    assert.deepEqual(reserves[1].slice(1), reserves[0].slice(1))
+    assert.equal(reserves[1][1].actor_customer_id, actor.customerId)
+    assert.equal(reserves[1][1].request_id, canonicalId)
+    assert.equal(reserves[1][1].purpose, `Expense request ${canonicalId}`)
+    assert.equal(h.calls.find(([name]) => name === 'completeRetryReservation')[1].actor.customerId, resumingAdmin.customerId)
+  })
+}
+
+test('retry fails closed without a valid persisted reservation actor', async () => {
+  for (const origin of [undefined, null, 'bad']) {
+    const h = retryHarness()
+    const base = h.repository.preparePayoutRetry
+    h.repository.preparePayoutRetry = async (input) => ({ ...await base(input), reservationActorCustomerId: origin })
+    await assert.rejects(h.service.retry(actor, requestId), { code: 'PAYOUT_RETRY_PREPARATION_INVALID' })
+    assert.equal(h.calls.some(([name]) => name === 'reserve'), false)
+  }
 })

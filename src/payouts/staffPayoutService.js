@@ -446,8 +446,8 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     if (!UUID.test(String(requestId || ''))) throw new StaffPayoutServiceError('INVALID_REQUEST', 400)
     const admin = { customerId: actor.customerId, role: 'admin' }
     const prepared = await repository.preparePayoutRetry({ actor: admin, requestId, requestIdForAudit })
-    const { request, payout, reservation } = prepared
-    if (!request || !payout || !prepared.requiresReservation || payout.state !== 'RESERVING' ||
+    const { request, payout, reservation, reservationActorCustomerId } = prepared
+    if (!UUID.test(String(reservationActorCustomerId || '')) || !request || !payout || !prepared.requiresReservation || payout.state !== 'RESERVING' ||
         String(request.request_id).toLowerCase() !== requestId.toLowerCase() ||
         !UUID.test(String(payout.payout_id || '')) || !reservation ||
         !UUID.test(String(reservation.operationId || '')) || reservation.operationId !== payout.reservation_operation_id ||
@@ -477,12 +477,12 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     let completed
     try {
       const result = await financeClient.reserve({
-        operation_id: reservation.operationId, request_id: requestId,
-        requester_customer_id: reservation.requesterCustomerId, actor_customer_id: actor.customerId,
+        operation_id: reservation.operationId, request_id: request.request_id,
+        requester_customer_id: reservation.requesterCustomerId, actor_customer_id: reservationActorCustomerId,
         amount: reservation.amount, currency: reservation.currency,
         expense_category_code: reservation.expenseCategoryCode, provider_code: reservation.providerCode,
         provider_account_id: reservation.providerAccountId, provider_account_version: reservation.providerAccountVersion,
-        purpose: `Expense request ${requestId}`,
+        purpose: `Expense request ${request.request_id}`,
       }, reservation.idempotencyKey, requestIdForAudit)
       const operation = result?.operation
       if (!operation || String(operation.operation_id).toLowerCase() !== reservation.operationId.toLowerCase() ||

@@ -175,6 +175,7 @@ test('request approval and payout preparation commit staged decisions atomically
 
     const retry = await payouts.preparePayoutRetry({ actor: admin, requestId })
     assert.equal(retry.payout.state, 'RESERVING')
+    assert.equal(retry.reservationActorCustomerId, adminId)
     assert.notEqual(retry.payout.payout_id, adminApproved.payout.payout_id)
     assert.notEqual(retry.payout.payout_attempt_id, adminApproved.payout.payout_attempt_id)
     assert.notEqual(retry.payout.client_reference_id, adminApproved.payout.client_reference_id)
@@ -209,9 +210,27 @@ test('request approval and payout preparation commit staged decisions atomically
     } finally { constraintClient.release() }
     await payouts.markRetryReservationFailure({ actor: admin, requestId, payoutId: retry.payout.payout_id,
       operationId: retry.reservation.operationId, state: 'UNKNOWN', errorCode: 'ITC_UNAVAILABLE' })
-    const resumed = await payouts.preparePayoutRetry({ actor: admin, requestId })
+    const resumed = await payouts.preparePayoutRetry({ actor: { ...admin, customerId: randomUUID() }, requestId: requestId.toUpperCase() })
+    assert.equal(resumed.reservationActorCustomerId, adminId)
+    assert.equal(resumed.request.request_id, requestId)
     assert.equal(resumed.payout.payout_id, retry.payout.payout_id)
     assert.deepEqual(resumed.reservation, retry.reservation)
+    // Only a matching attempt/request/operation audit is a valid origin.
+    await pool.query(`UPDATE pg_temp.audit_events SET action = 'test.origin.hidden'
+      WHERE target_id = $1 AND action = 'payout.retry.reservation_started'`, [retry.payout.payout_id])
+    await assert.rejects(payouts.preparePayoutRetry({ actor: admin, requestId }), { code: 'PAYOUT_RETRY_ORIGIN_UNAVAILABLE' })
+    await pool.query(`UPDATE pg_temp.audit_events SET action = 'payout.retry.reservation_started'
+      WHERE target_id = $1 AND action = 'test.origin.hidden'`, [retry.payout.payout_id])
+    const savedMetadata = (await pool.query('SELECT metadata FROM pg_temp.audit_events WHERE target_id = $1 AND action = $2',
+      [retry.payout.payout_id, 'payout.retry.reservation_started'])).rows[0].metadata
+    for (const change of [{ request_id: randomUUID() }, { operation_id: randomUUID() }]) {
+      await pool.query(`UPDATE pg_temp.audit_events SET metadata = $2::jsonb WHERE target_id = $1 AND action = 'payout.retry.reservation_started'`,
+        [retry.payout.payout_id, JSON.stringify({ ...savedMetadata, ...change })])
+      await assert.rejects(payouts.preparePayoutRetry({ actor: admin, requestId }), { code: 'PAYOUT_RETRY_ORIGIN_UNAVAILABLE' })
+    }
+    await pool.query(`UPDATE pg_temp.audit_events SET metadata = $2::jsonb WHERE target_id = $1 AND action = 'payout.retry.reservation_started'`,
+      [retry.payout.payout_id, JSON.stringify(savedMetadata)])
+    assert.equal((await payouts.preparePayoutRetry({ actor: admin, requestId })).reservationActorCustomerId, adminId)
     await payouts.markRetryReservationFailure({ actor: admin, requestId, payoutId: retry.payout.payout_id,
       operationId: retry.reservation.operationId, state: 'FAILED', errorCode: 'INSUFFICIENT_FUNDS' })
     const failedReservation = await payouts.listRecovery({})

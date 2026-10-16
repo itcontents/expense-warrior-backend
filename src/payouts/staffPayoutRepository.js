@@ -389,6 +389,23 @@ async function auditRetry(client, actor, action, requestId, payoutId, requestIdF
   `, [actor.customerId, action, payoutId, requestIdForAudit, JSON.stringify({ request_id: requestId, ...metadata })])
 }
 
+async function retryReservationActor(client, request, payout) {
+  const result = await client.query(`
+    SELECT actor_customer_id
+      FROM audit_events
+     WHERE target_type = 'staff_payout' AND target_id = $1
+       AND action = 'payout.retry.reservation_started'
+       AND lower(metadata->>'request_id') = $2
+       AND lower(metadata->>'operation_id') = $3
+     LIMIT 2
+  `, [payout.payout_id, String(request.request_id).toLowerCase(), String(payout.reservation_operation_id).toLowerCase()])
+  const actorId = result.rows[0]?.actor_customer_id
+  if (result.rows.length !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(actorId || ''))) {
+    throw new StaffPayoutRepositoryError('PAYOUT_RETRY_ORIGIN_UNAVAILABLE', 409)
+  }
+  return String(actorId).toLowerCase()
+}
+
 async function preparePayoutRetry({ pool, actor, requestId, requestIdForAudit = null, idFactory }) {
   return withLockedPayout({ pool, actor, requestId }, async (client, request, payout) => {
     if (payout?.state === 'RESERVING') {
@@ -401,7 +418,8 @@ async function preparePayoutRetry({ pool, actor, requestId, requestIdForAudit = 
         throw new StaffPayoutRepositoryError('PAYOUT_RETRY_NOT_ALLOWED', 409)
       }
       return { request, payout: publicPayout(payout), requiresReservation: true,
-        shouldInitiate: false, replayed: true, reservation: retryReservation(request, payout) }
+        shouldInitiate: false, replayed: true, reservation: retryReservation(request, payout),
+        reservationActorCustomerId: await retryReservationActor(client, request, payout) }
     }
     const prior = payout?.state === 'RESERVATION_FAILED' ? await previousProviderAttempt(client, requestId) : payout
     if (request.status !== 'PAYOUT_FAILED' || !payout ||
@@ -449,11 +467,12 @@ async function preparePayoutRetry({ pool, actor, requestId, requestIdForAudit = 
     `, [requestId, operationId, idempotencyKey])
     const updatedRequest = { ...request, status: 'PAYOUT_PENDING', finance_operation_id: operationId,
       finance_idempotency_key: idempotencyKey, finance_hold_id: null, finance_reservation_state: 'PENDING', finance_error_code: null }
-    await auditRetry(client, actor, 'payout.retry.reservation_started', requestId, payoutId, requestIdForAudit,
+    await auditRetry(client, actor, 'payout.retry.reservation_started', request.request_id, payoutId, requestIdForAudit,
       { previous_payout_id: payout.payout_id, payout_attempt_id: payoutAttemptId, operation_id: operationId })
     return { request: updatedRequest, payout: publicPayout(created.rows[0]), requiresReservation: true,
       shouldInitiate: false, replayed: false,
-      reservation: retryReservation(updatedRequest, created.rows[0]) }
+      reservation: retryReservation(updatedRequest, created.rows[0]),
+      reservationActorCustomerId: await retryReservationActor(client, updatedRequest, created.rows[0]) }
   })
 }
 

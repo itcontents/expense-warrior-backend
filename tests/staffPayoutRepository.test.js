@@ -20,10 +20,11 @@ const failed = {
   reservation_operation_id: request.finance_operation_id, reservation_idempotency_key: request.finance_idempotency_key,
   reservation_hold_id: request.finance_hold_id, reservation_state: 'RELEASED',
 }
-function fixture({ currentRequest = request, payout = failed, prior = failed, inserted = {} } = {}) {
+function fixture({ currentRequest = request, payout = failed, prior = failed, inserted = {}, auditRows = [{ actor_customer_id: actor.customerId }] } = {}) {
   const calls = []
   const client = { release() {}, async query(sql, values) {
     calls.push({ sql, values })
+    if (sql.includes('FROM audit_events')) return { rows: auditRows, rowCount: auditRows.length }
     if (sql.includes('SELECT request.request_id')) return { rows: [currentRequest], rowCount: 1 }
     if (sql.includes('SELECT payout_id FROM request_payout_attempts')) return { rows: [], rowCount: 0 }
     if (sql.includes('FROM request_payout_attempts') && sql.includes('SELECT')) {
@@ -235,3 +236,32 @@ test('retry cannot discard a mismatched or still reserved current request hold',
     assert.equal(calls.some(({ sql }) => sql.includes('INSERT INTO request_payout_attempts')), false)
   }
 })
+
+
+test('retry preparation returns the canonical actor from its persisted origin audit', async () => {
+  const { repository } = fixture()
+  const created = await repository.preparePayoutRetry({ actor: { ...actor, customerId: actor.customerId.toUpperCase() }, requestId })
+  assert.equal(created.reservationActorCustomerId, actor.customerId)
+})
+
+test('reserving replay recovers the original actor across admin and request UUID casing changes', async () => {
+  const { repository, calls } = fixture({ currentRequest: pendingRequest, payout: reserving })
+  const replay = await repository.preparePayoutRetry({ actor: { ...actor, customerId: randomUUID() }, requestId: requestId.toUpperCase() })
+  assert.equal(replay.reservationActorCustomerId, actor.customerId)
+  assert.equal(replay.request.request_id, requestId)
+  const lookup = calls.find(({ sql }) => sql.includes('FROM audit_events'))
+  assert.ok(lookup.values.includes(reserving.payout_id))
+  assert.ok(lookup.values.includes(requestId))
+  assert.ok(lookup.values.includes(reserving.reservation_operation_id))
+  assert.equal(calls.some(({ sql }) => /^\s*(INSERT|UPDATE)\b/.test(sql)), false)
+})
+
+for (const auditRows of [[], [{ actor_customer_id: null }], [{ actor_customer_id: 'bad' }],
+  [{ actor_customer_id: actor.customerId }, { actor_customer_id: randomUUID() }]]) {
+  test(`retry cannot resume without one valid immutable origin audit actor ${JSON.stringify(auditRows)}`, async () => {
+    const { repository, calls } = fixture({ currentRequest: pendingRequest, payout: reserving, auditRows })
+    await assert.rejects(repository.preparePayoutRetry({ actor, requestId }), { code: 'PAYOUT_RETRY_ORIGIN_UNAVAILABLE' })
+    assert.ok(calls.some(({ sql }) => sql === 'ROLLBACK'))
+    assert.equal(calls.some(({ sql }) => /^\s*(INSERT|UPDATE)\b/.test(sql)), false)
+  })
+}
