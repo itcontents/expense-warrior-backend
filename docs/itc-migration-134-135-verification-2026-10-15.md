@@ -51,3 +51,14 @@ Using `scripts/codex_db.js` again with the asserted `shopit_accounting_audit` re
 - The current `local_staging` COA still has 1020 (`PawaPay Clearing – ZMW`) active/postable and 2020 (`Customer Credit Payable`) active/postable. Account 1100 (`Trade Receivables`) remains inactive/non-postable, so A/R collection is not ready even apart from migrations 136–137.
 
 No DDL/DML, migrations, provider calls, or financial postings were performed. The next verification prerequisite is a least-privilege reader that can inspect `commerce_schema_migrations` in both targets. Until then, do not infer successful application from table presence or the owner's migration report, and keep the finance feature gates off.
+
+## Read-only schema-shape comparison — 16 October 2026
+
+Using the same guarded audit role, read-only catalog queries compared the live `itc` and `local_staging` schema with the checked-out 134/135 migration sources:
+
+- All five expected tables have the source column names, order, PostgreSQL types, and nullability in both databases.
+- The expected primary/unique/check/foreign-key constraints and all 18 Expense Warrior indexes are present in both databases.
+- All eight migration-defined Expense Warrior triggers and the expected nonce, hold-transition, treasury-ledger, customer-credit, and immutable-event functions are present. Catalog flags show `apply_treasury_ledger_entry` and `claim_expense_warrior_service_nonce` are `SECURITY DEFINER`; guard functions are invoker functions.
+- The release-ledger result is unchanged: `local_staging` has a 133 entry but no 134/135 entries. In `itc`, the audit role cannot access `public` to read ledger rows.
+
+This verifies a close match in the inspected live schema shape. It does not prove that the guarded migration runner applied the exact source files, that function bodies match byte-for-byte, or that the migration ledger contains matching 134/135 checksums. Do not treat this catalog comparison as permission to enable finance operations or as a substitute for ledger access. No business rows were read, and no database or provider writes were performed.
