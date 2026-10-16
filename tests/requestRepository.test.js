@@ -213,6 +213,26 @@ test('listRequests_appliesActorScopePaginationAndAllowlistedSort', async () => {
   assert.deepEqual(call.values, ['staff', actor.customerId, 26, 50])
 })
 
+test('listRequests_exposesOnlyTerminalPayoutFailureCodesWithinTheActorScopedList', async () => {
+  let call
+  const failure = { request_id: '70000000-0000-4000-8000-000000000007', payout_error_code: 'PAWAPAY_INSUFFICIENT_BALANCE' }
+  const pool = { connect: async () => assert.fail('list query should not open a transaction'), query: async (sql, values) => {
+    call = { sql, values }
+    return { rows: [failure] }
+  } }
+  const repository = createRequestRepository({ pool })
+
+  const result = await repository.listForActor({
+    actor,
+    filters: { limit: 25, offset: 0, sort: 'created_at', direction: 'desc' },
+  })
+
+  assert.match(call.sql, /LEFT JOIN request_payout_attempts payout ON payout\.request_id = r\.request_id/)
+  assert.match(call.sql, /CASE WHEN r\.status = 'PAYOUT_FAILED' AND payout\.state = 'FAILED' THEN payout\.error_code END AS payout_error_code/)
+  assert.equal(result.items[0].payout_error_code, 'PAWAPAY_INSUFFICIENT_BALANCE')
+  assert.deepEqual(call.values, ['staff', actor.customerId, 26, 0])
+})
+
 test('listApprovals_usesManagerScopeOrAdminQueueAndExcludesSelfApproval', async () => {
   let call
   const pool = { connect: async () => assert.fail('approval queue must be read-only'), query: async (sql, values) => { call = { sql, values }; return { rows: [] } } }

@@ -15,6 +15,7 @@ const TABLES = Object.freeze([
   'employee_manager_assignments',
   'staff_payout_destinations',
   'expense_requests',
+  'request_payout_attempts',
   'expense_request_attachments',
   'audit_events',
 ])
@@ -36,10 +37,14 @@ test('request repository uses real PostgreSQL transactions, constraints and repl
       await createTemporaryTables(client, TABLES)
       const resolution = await client.query(`
         SELECT to_regclass('expense_requests')::text AS resolved_table,
-               to_regclass('pg_temp.expense_requests')::text AS temporary_table
+               to_regclass('pg_temp.expense_requests')::text AS temporary_table,
+               to_regclass('request_payout_attempts')::text AS resolved_payout_table,
+               to_regclass('pg_temp.request_payout_attempts')::text AS temporary_payout_table
       `)
       assert.equal(resolution.rows[0].resolved_table, resolution.rows[0].temporary_table,
         'repository table names must resolve to session-local temporary tables')
+      assert.equal(resolution.rows[0].resolved_payout_table, resolution.rows[0].temporary_payout_table,
+        'payout joins must resolve to the session-local test table')
     } finally {
       client.release()
     }
