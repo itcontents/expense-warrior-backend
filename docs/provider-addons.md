@@ -14,7 +14,7 @@ The browser sends only `provider_code`, `network_code`, and the payer's phone nu
 2. Add a registrar under `src/providers/` and register it in `src/providers/providerAddons.js`. Registration is static and reviewed; do not load executable add-ons from the database or the filesystem at runtime.
 3. Add validated provider configuration to `src/config/env.js`. Keep all credentials server-side and fail startup or the requested operation closed when required signing configuration is incomplete.
 4. Return the adapter definition map from the registrar. Each definition has a unique lowercase provider code, `contractVersion: 1`, `create()`, `getNetworks(operation)`, and an account identity. Add `getActiveNetworks(operation, options)` for account-enabled public choices. Add `createForAccount(identity)` when old attempts must continue using a pinned account configuration after configuration changes.
-5. Keep `provider_code` alongside `network_code` in attempt identity, idempotency fingerprints, audit records, callback routing, and reports. The same network code can exist under multiple providers.
+5. Keep `provider_code` alongside `network_code` in attempt identity, idempotency fingerprints, audit records, callback routing, and reports. The registry owns `provider_code` and overwrites any adapter-supplied value. The same network code can exist under multiple providers.
 6. Add mocked contract tests and database tests for the provider's supported operations. Do not enable its financial flags or call a provider until its account-specific configuration and signing requirements have been verified.
 
 ## Normalized adapter contract

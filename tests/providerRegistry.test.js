@@ -32,6 +32,51 @@ test('provider registry exposes deposit capabilities across lazy registered adap
     error instanceof ProviderRegistryError && error.code === 'PAYMENT_PROVIDER_CAPABILITY_UNAVAILABLE')
 })
 
+test('provider registry keeps registered provider identity authoritative over network metadata', async () => {
+  const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const signaturePrivateKey = pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  const registry = createProviderRegistry({
+    pawaPayConfig: {
+      apiToken: 'sandbox-test-token',
+      baseUrl: 'https://api.sandbox.pawapay.io',
+      signatureEnabled: true,
+      signatureKeyId: 'test',
+      signaturePrivateKey,
+    },
+    dependencies: { pawapay: { fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => JSON.stringify({ countries: [{ country: 'ZMB', providers: [] }] }),
+    }) } },
+    additionalProviders: {
+      airtel_direct: {
+        contractVersion: 1,
+        create: () => ({ contractVersion: 1, initiateDeposit() {}, getDepositStatus() {} }),
+        getNetworks: () => [{ ...airtelNetwork, provider_code: 'pawapay' }],
+        getActiveNetworks: async () => [{
+          ...airtelNetwork,
+          min_amount: '1',
+          max_amount: '1000',
+          provider_code: 'pawapay',
+        }],
+      },
+    },
+  })
+
+  assert.deepEqual(registry.getNetworks('airtel_direct', 'deposit'), [
+    { provider_code: 'airtel_direct', ...airtelNetwork },
+  ])
+  assert.deepEqual(await registry.getActiveNetworks('deposit', { country: 'ZMB', currency: 'ZMW' }), [
+    {
+      provider_code: 'airtel_direct',
+      ...airtelNetwork,
+      min_amount: '1',
+      max_amount: '1000',
+    },
+  ])
+})
+
 test('PawaPay exposes its configured Zambian deposit and payout networks separately from other operations', () => {
   const registry = createProviderRegistry({ pawaPayConfig: {} })
   assert.deepEqual(registry.getNetworks('pawapay', 'payout').map(({ code }) => code), [

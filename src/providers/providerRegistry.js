@@ -229,7 +229,7 @@ function createProviderRegistry({ pawaPayConfig, dependencies = {}, additionalPr
           if (!network || typeof network !== 'object' || typeof network.code !== 'string' || !network.code.trim()) {
             throw new ProviderRegistryError('PAYMENT_PROVIDER_CAPABILITY_UNAVAILABLE', 503)
           }
-          return { provider_code: registeredCode, ...network }
+          return { ...network, provider_code: registeredCode }
         })
       })
     },
@@ -245,7 +245,7 @@ function createProviderRegistry({ pawaPayConfig, dependencies = {}, additionalPr
           typeof network.label !== 'string' || !network.label.trim())) {
           throw new ProviderRegistryError('PAYMENT_PROVIDER_CONFIGURATION_INVALID', 503)
         }
-        return networks.map((network) => ({ provider_code: registeredCode, ...network }))
+        return networks.map((network) => ({ ...network, provider_code: registeredCode }))
       }))
       return networkLists.flat()
     },
