@@ -56,6 +56,61 @@ test('startAttempt persists a stable attempt, sends one signed-provider operatio
   assert.equal(JSON.stringify(result).includes('260763456789'), false)
 })
 
+test('startAttempt preserves the selected add-on and account identity through attempt creation', async () => {
+  const addonAccount = { provider_account_id: '71000000-0000-4000-8000-000000000001', provider_account_version: 3 }
+  const addonNetwork = { ...mtnDepositOption, provider_code: 'airtel_direct', code: 'AIRTEL_OAPI_ZMB', provider_label: 'Airtel Direct' }
+  const repositoryInputs = []
+  const adapterSelections = []
+  const initiated = []
+  const adapter = {
+    initiateDeposit: async (input) => {
+      initiated.push(input)
+      return acceptedDeposit()
+    },
+    getDepositStatus: async () => null,
+  }
+  const persistedAttempt = (input) => ({
+    ...baseAttempt,
+    ...input,
+    provider_code: input.providerCode,
+    provider_account_id: input.providerAccountId,
+    provider_account_version: input.providerAccountVersion,
+    network_code: input.networkCode,
+    payer_phone: input.phoneNumber,
+  })
+  const service = createPublicPaymentService({
+    repository: {
+      getPublicLink: async () => baseLink,
+      createAttempt: async (input) => {
+        repositoryInputs.push(input)
+        return { link: baseLink, attempt: persistedAttempt(input), replayed: false }
+      },
+      updateAttempt: async (_attemptId, changes) => ({ ...persistedAttempt(repositoryInputs[0]), ...changes }),
+    },
+    idFactory: () => attemptId,
+    providerRegistry: {
+      getActiveNetworks: async () => [addonNetwork],
+      getAccountIdentity: (providerCode) => providerCode === 'airtel_direct' ? addonAccount : null,
+      getForOperation: (...selection) => {
+        adapterSelections.push(selection)
+        return adapter
+      },
+    },
+  })
+
+  const result = await service.startAttempt(token, {
+    provider_code: 'airtel_direct', network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783',
+  }, idempotencyKey)
+
+  assert.equal(result.attempt.provider_code, 'airtel_direct')
+  assert.equal(repositoryInputs[0].providerCode, 'airtel_direct')
+  assert.equal(repositoryInputs[0].providerAccountId, addonAccount.provider_account_id)
+  assert.equal(repositoryInputs[0].providerAccountVersion, addonAccount.provider_account_version)
+  assert.deepEqual(adapterSelections, [['airtel_direct', 'deposit', addonAccount]])
+  assert.equal(initiated[0].network_code, 'AIRTEL_OAPI_ZMB')
+  assert.equal(initiated[0].phone_number, '260957909783')
+})
+
 test('startAttempt sends whole-number amounts as integers for a NONE-decimal network', async () => {
   const calls = []
   const noDecimalOption = { ...mtnDepositOption, decimals_in_amount: 'NONE' }
