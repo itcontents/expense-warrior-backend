@@ -7,6 +7,65 @@ class ManagerAssignmentRepositoryError extends Error {
   }
 }
 
+async function routePendingManagerRequests(client, {
+  actorId,
+  staffId,
+  previousAssignment,
+  nextAssignment = null,
+}) {
+  if (!previousAssignment?.assignment_id) return
+
+  const pendingResult = await client.query(`
+    SELECT request_id, status
+      FROM expense_requests
+     WHERE requester_customer_id = $1
+       AND manager_assignment_id = $2
+       AND reviewer_manager_customer_id = $3
+       AND status = 'PENDING_MANAGER'
+     ORDER BY request_id
+     FOR UPDATE
+  `, [staffId, previousAssignment.assignment_id, previousAssignment.manager_customer_id])
+
+  for (const request of pendingResult.rows) {
+    const status = nextAssignment ? 'PENDING_MANAGER' : 'PENDING_ADMIN'
+    const updatedResult = await client.query(`
+      UPDATE expense_requests
+         SET manager_assignment_id = $2,
+             reviewer_manager_customer_id = $3,
+             status = $4,
+             updated_at = transaction_timestamp()
+       WHERE request_id = $1
+         AND manager_assignment_id = $5
+         AND reviewer_manager_customer_id = $6
+         AND status = 'PENDING_MANAGER'
+       RETURNING request_id
+    `, [
+      request.request_id,
+      nextAssignment?.assignment_id || null,
+      nextAssignment?.manager_customer_id || null,
+      status,
+      previousAssignment.assignment_id,
+      previousAssignment.manager_customer_id,
+    ])
+    if (!updatedResult.rowCount) continue
+
+    const metadata = {
+      staff_customer_id: staffId,
+      previous_manager_customer_id: previousAssignment.manager_customer_id,
+      manager_customer_id: nextAssignment?.manager_customer_id || null,
+      previous_manager_assignment_id: previousAssignment.assignment_id,
+      manager_assignment_id: nextAssignment?.assignment_id || null,
+      previous_status: 'PENDING_MANAGER',
+      status,
+      routing_reason: nextAssignment ? 'manager_reassigned' : 'manager_assignment_ended',
+    }
+    await client.query(`
+      INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
+      VALUES ($1, 'request.manager_reassigned', 'expense_request', $2, $3::jsonb)
+    `, [actorId, request.request_id, JSON.stringify(metadata)])
+  }
+}
+
 async function assign({ pool, actorId, staffId, managerId }) {
   const client = await pool.connect()
   try {
@@ -41,6 +100,12 @@ async function assign({ pool, actorId, staffId, managerId }) {
                 effective_from, effective_to, created_at
     `, [staffId, managerId, actorId])
     const created = createdResult.rows[0]
+    await routePendingManagerRequests(client, {
+      actorId,
+      staffId,
+      previousAssignment: current,
+      nextAssignment: created,
+    })
     await client.query(`
       INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
       VALUES ($1, 'manager_assignment.changed', 'manager_assignment', $2, $3::jsonb)
@@ -86,6 +151,11 @@ async function end({ pool, actorId, assignmentId }) {
       await client.query('COMMIT')
       return null
     }
+    await routePendingManagerRequests(client, {
+      actorId,
+      staffId: ended.staff_customer_id,
+      previousAssignment: ended,
+    })
     await client.query(`
       INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
       VALUES ($1, 'manager_assignment.ended', 'manager_assignment', $2, $3::jsonb)
