@@ -222,7 +222,8 @@ async function listForActor({ pool, actor, filters }) {
            r.status,
            r.finance_reservation_state,
            r.finance_error_code,
-           CASE WHEN r.status = 'PAYOUT_FAILED' AND payout.state = 'FAILED' THEN payout.error_code END AS payout_error_code,
+           payout.state AS payout_state,
+           CASE WHEN r.status = 'PAYOUT_FAILED' AND payout.state IN ('FAILED','RESERVATION_FAILED') THEN payout.error_code END AS payout_error_code,
            r.created_at AS submitted_at,
            COALESCE((SELECT jsonb_agg(jsonb_build_object(
              'attachment_id', a.attachment_id,
@@ -234,7 +235,12 @@ async function listForActor({ pool, actor, filters }) {
       FROM expense_requests r
       JOIN expense_categories category ON category.category_id = r.category_id
       LEFT JOIN expense_categories subcategory ON subcategory.category_id = r.subcategory_id
-      LEFT JOIN request_payout_attempts payout ON payout.request_id = r.request_id
+      LEFT JOIN LATERAL (
+        SELECT state, error_code FROM request_payout_attempts
+         WHERE request_id = r.request_id
+         ORDER BY created_at DESC, payout_id DESC
+         LIMIT 1
+      ) payout ON true
      WHERE $1::text = 'admin'
         OR r.requester_customer_id = $2
         OR ($1::text = 'staff' AND r.reviewer_manager_customer_id = $2)

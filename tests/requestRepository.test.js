@@ -227,8 +227,9 @@ test('listRequests_exposesOnlyTerminalPayoutFailureCodesWithinTheActorScopedList
     filters: { limit: 25, offset: 0, sort: 'created_at', direction: 'desc' },
   })
 
-  assert.match(call.sql, /LEFT JOIN request_payout_attempts payout ON payout\.request_id = r\.request_id/)
-  assert.match(call.sql, /CASE WHEN r\.status = 'PAYOUT_FAILED' AND payout\.state = 'FAILED' THEN payout\.error_code END AS payout_error_code/)
+  assert.match(call.sql, /LEFT JOIN LATERAL/)
+  assert.match(call.sql, /WHERE request_id = r\.request_id\s+ORDER BY created_at DESC, payout_id DESC\s+LIMIT 1/)
+  assert.match(call.sql, /CASE WHEN r\.status = 'PAYOUT_FAILED' AND payout\.state IN \('FAILED','RESERVATION_FAILED'\) THEN payout\.error_code END AS payout_error_code/)
   assert.equal(result.items[0].payout_error_code, 'PAWAPAY_INSUFFICIENT_BALANCE')
   assert.deepEqual(call.values, ['staff', actor.customerId, 26, 0])
 })

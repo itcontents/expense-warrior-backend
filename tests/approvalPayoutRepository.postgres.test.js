@@ -19,6 +19,7 @@ const TABLES = Object.freeze([
   'idempotency_records',
   'request_payout_attempts',
   'audit_events',
+  'expense_request_attachments',
 ])
 
 test('request approval and payout preparation commit staged decisions atomically in temporary PostgreSQL tables', { skip: !enabled }, async () => {
@@ -152,41 +153,48 @@ test('request approval and payout preparation commit staged decisions atomically
         FROM pg_temp.request_payout_attempts WHERE payout_id = $1
     `, [adminApproved.payout.payout_id])
     assert.deepEqual(initialSnapshot.rows[0], {
-      reservation_operation_id: null, reservation_idempotency_key: null,
-      reservation_hold_id: null, reservation_state: null,
-    }, 'the original payout writer remains compatible until Task 2 populates snapshots')
+      reservation_operation_id: operationId, reservation_idempotency_key: manager.operation.idempotencyKey,
+      reservation_hold_id: holdId, reservation_state: 'RESERVED',
+    }, 'the first attempt snapshots its original hold')
 
+    const admin = { customerId: adminId, role: 'admin' }
+    await assert.rejects(payouts.preparePayoutRetry({ actor: admin, requestId }), { code: 'PAYOUT_RETRY_NOT_ALLOWED' })
+    await payouts.recordInitiation({ actorId: adminId, requestId, payoutId: adminApproved.payout.payout_id,
+      providerStatus: 'REJECTED', errorCode: 'PAWAPAY_INSUFFICIENT_BALANCE' })
+    await assert.rejects(payouts.preparePayoutRetry({ actor: admin, requestId }), { code: 'PAYOUT_RETRY_NOT_ALLOWED' })
+    const originalRelease = await payouts.prepareRelease({ actor: admin, requestId,
+      payoutId: adminApproved.payout.payout_id, reasonCode: 'PAWAPAY_INSUFFICIENT_BALANCE' })
+    assert.equal(originalRelease.operation.holdId, holdId)
+    const releaseEvidence = { operation_id: originalRelease.operation.operationId, request_id: requestId,
+      hold_id: holdId, state: 'RELEASED' }
+    await payouts.completeRelease({ actor: admin, requestId, payoutId: adminApproved.payout.payout_id,
+      operationId: originalRelease.operation.operationId, financeOperation: releaseEvidence })
+    const eligible = await payouts.listRecovery({})
+    assert.equal(eligible.items.length, 1)
+    assert.equal(eligible.items[0].retry_allowed, true)
+
+    const retry = await payouts.preparePayoutRetry({ actor: admin, requestId })
+    assert.equal(retry.payout.state, 'RESERVING')
+    assert.notEqual(retry.payout.payout_id, adminApproved.payout.payout_id)
+    assert.notEqual(retry.payout.payout_attempt_id, adminApproved.payout.payout_attempt_id)
+    assert.notEqual(retry.payout.client_reference_id, adminApproved.payout.client_reference_id)
+    assert.notEqual(retry.reservation.operationId, operationId)
+    assert.notEqual(retry.reservation.idempotencyKey, manager.operation.idempotencyKey)
+    assert.equal(retry.shouldInitiate, false)
     const constraintClient = await pool.connect()
     try {
-      // All subsequent mutations target the temporary table explicitly. These
-      // fixtures exercise retry constraints without making any financial API call.
-      const appendAttempt = (state, reservationState = null) => constraintClient.query(`
-        INSERT INTO pg_temp.request_payout_attempts (
-          payout_id, payout_attempt_id, request_id, provider_code, network_code,
-          amount, currency, client_reference_id, state, consume_operation_id,
-          reservation_operation_id, reservation_idempotency_key, reservation_state
-        ) SELECT $2, $3, request_id, provider_code, network_code,
-                 amount, currency, $4, $5, $6, $7, $8, $9
-            FROM pg_temp.request_payout_attempts WHERE payout_id = $1
-        RETURNING *
-      `, [adminApproved.payout.payout_id, randomUUID(), randomUUID(), randomUUID(), state,
-        randomUUID(), reservationState ? randomUUID() : null,
-        reservationState ? randomUUID() : null, reservationState])
-
-      await assert.rejects(appendAttempt('SUBMITTING'), (error) =>
-        error.code === '23505' && error.constraint === 'request_payout_attempts_one_active_test_idx')
-      await constraintClient.query(`
-        UPDATE pg_temp.request_payout_attempts
-           SET state = 'FAILED', release_state = 'RELEASED',
-               reservation_operation_id = $2, reservation_idempotency_key = $3,
-               reservation_hold_id = $4, reservation_state = 'RELEASED'
-         WHERE payout_id = $1
-      `, [adminApproved.payout.payout_id, operationId, manager.operation.idempotencyKey, holdId])
-      const retry = (await appendAttempt('RESERVING', 'PENDING')).rows[0]
       for (const state of ['RESERVING', 'SUBMITTING', 'PENDING', 'UNKNOWN', 'VERIFICATION_REQUIRED', 'FAILED_PENDING_RELEASE']) {
-        await assert.rejects(appendAttempt(state, state === 'RESERVING' ? 'UNKNOWN' : null), (error) =>
-          error.code === '23505' && error.constraint === 'request_payout_attempts_one_active_test_idx',
-        `an active retry must block another ${state} attempt`)
+        await assert.rejects(constraintClient.query(`
+          INSERT INTO pg_temp.request_payout_attempts (
+            payout_id, payout_attempt_id, request_id, provider_code, network_code,
+            amount, currency, client_reference_id, state, consume_operation_id,
+            reservation_operation_id, reservation_idempotency_key, reservation_state
+          ) SELECT $2, $3, request_id, provider_code, network_code, amount, currency, $4, $5, $6, $7, $8, $9
+              FROM pg_temp.request_payout_attempts WHERE payout_id = $1
+        `, [retry.payout.payout_id, randomUUID(), randomUUID(), randomUUID(), state, randomUUID(),
+          state === 'RESERVING' ? randomUUID() : null, state === 'RESERVING' ? randomUUID() : null,
+          state === 'RESERVING' ? 'PENDING' : null]), (error) =>
+          error.code === '23505' && error.constraint === 'request_payout_attempts_one_active_test_idx')
       }
       for (const change of [
         "reservation_state = NULL", "reservation_operation_id = NULL",
@@ -196,28 +204,78 @@ test('request approval and payout preparation commit staged decisions atomically
       ]) {
         await assert.rejects(constraintClient.query(`
           UPDATE pg_temp.request_payout_attempts SET ${change} WHERE payout_id = $1
-        `, [retry.payout_id]), (error) => error.code === '23514',
-        `incoherent reservation snapshot must fail: ${change}`)
+        `, [retry.payout.payout_id]), (error) => error.code === '23514')
       }
-      await constraintClient.query(`
-        UPDATE pg_temp.request_payout_attempts
-           SET state = 'RESERVATION_FAILED', reservation_state = 'FAILED'
-         WHERE payout_id = $1
-      `, [retry.payout_id])
-      const nextRetry = (await appendAttempt('RESERVING', 'UNKNOWN')).rows[0]
-      assert.notEqual(nextRetry.reservation_operation_id, retry.reservation_operation_id)
-      const history = await constraintClient.query(`
-        SELECT payout_id, state, reservation_operation_id, reservation_hold_id, reservation_state
-          FROM pg_temp.request_payout_attempts WHERE request_id = $1
-      `, [requestId])
-      assert.equal(history.rows.length, 3, 'terminal attempts remain in history')
-      assert.deepEqual(history.rows.find((row) => row.payout_id === adminApproved.payout.payout_id), {
-        payout_id: adminApproved.payout.payout_id, state: 'FAILED',
-        reservation_operation_id: operationId, reservation_hold_id: holdId, reservation_state: 'RELEASED',
-      }, 'later attempts retain the original reservation snapshot')
-    } finally {
-      constraintClient.release()
-    }
+    } finally { constraintClient.release() }
+    await payouts.markRetryReservationFailure({ actor: admin, requestId, payoutId: retry.payout.payout_id,
+      operationId: retry.reservation.operationId, state: 'UNKNOWN', errorCode: 'ITC_UNAVAILABLE' })
+    const resumed = await payouts.preparePayoutRetry({ actor: admin, requestId })
+    assert.equal(resumed.payout.payout_id, retry.payout.payout_id)
+    assert.deepEqual(resumed.reservation, retry.reservation)
+    await payouts.markRetryReservationFailure({ actor: admin, requestId, payoutId: retry.payout.payout_id,
+      operationId: retry.reservation.operationId, state: 'FAILED', errorCode: 'INSUFFICIENT_FUNDS' })
+    const failedReservation = await payouts.listRecovery({})
+    assert.equal(failedReservation.items.length, 1)
+    assert.equal(failedReservation.items[0].payout_state, 'RESERVATION_FAILED')
+    assert.equal(failedReservation.items[0].retry_allowed, true)
+
+    const failureList = await repository.listForActor({ actor: admin,
+      filters: { limit: 25, offset: 0, sort: 'created_at', direction: 'desc' } })
+    assert.equal(failureList.items.length, 1)
+    assert.equal(failureList.items[0].payout_state, 'RESERVATION_FAILED')
+    assert.equal(failureList.items[0].payout_error_code, 'INSUFFICIENT_FUNDS')
+
+    // A failed reservation must trace to the nearest prior provider failure,
+    // rather than any historical failure that happened to have been released.
+    await pool.query("UPDATE pg_temp.request_payout_attempts SET state = 'FAILED_PENDING_RELEASE', release_state = 'UNKNOWN' WHERE payout_id = $1", [adminApproved.payout.payout_id])
+    await assert.rejects(payouts.preparePayoutRetry({ actor: admin, requestId }), { code: 'PAYOUT_RETRY_NOT_ALLOWED' })
+    assert.equal((await payouts.listRecovery({})).items.length, 0)
+    await pool.query("UPDATE pg_temp.request_payout_attempts SET state = 'FAILED', release_state = 'RELEASED' WHERE payout_id = $1", [adminApproved.payout.payout_id])
+    const next = await payouts.preparePayoutRetry({ actor: admin, requestId })
+    assert.notEqual(next.reservation.operationId, retry.reservation.operationId)
+    const nextHoldId = randomUUID()
+    const nextEvidence = { ...financeOperation, operation_id: next.reservation.operationId, hold_id: nextHoldId,
+      provider_code: next.reservation.providerCode, provider_account_id: next.reservation.providerAccountId,
+      provider_account_version: next.reservation.providerAccountVersion }
+    await assert.rejects(payouts.completeRetryReservation({ actor: admin, requestId, payoutId: next.payout.payout_id,
+      reservation: next.reservation, financeOperation: { ...nextEvidence, hold_id: holdId } }), { code: 'FINANCE_RESERVATION_MISMATCH' })
+    const completions = await Promise.all([1, 2].map(() => payouts.completeRetryReservation({
+      actor: admin, requestId, payoutId: next.payout.payout_id, reservation: next.reservation, financeOperation: nextEvidence,
+    })))
+    assert.equal(completions.filter((result) => result.shouldInitiate).length, 1,
+      'only the transaction changing RESERVING to SUBMITTING may initiate')
+    assert.equal(completions[0].payout.reservation_hold_id, nextHoldId)
+    await assert.rejects(payouts.completeRelease({ actor: admin, requestId, payoutId: adminApproved.payout.payout_id,
+      operationId: originalRelease.operation.operationId, financeOperation: releaseEvidence }), { code: 'PAYOUT_RELEASE_CONFLICT' })
+    await payouts.markPending({ actorId: adminId, requestId, payoutId: next.payout.payout_id, providerStatus: 'ACCEPTED' })
+    const consumedEvidence = { ...nextEvidence, operation_id: next.payout.consume_operation_id, state: 'CONSUMED',
+      payout_attempt_id: next.payout.payout_attempt_id, provider_transaction_id: next.payout.payout_id }
+    await assert.rejects(payouts.completePayout({ actor: admin, requestId, payoutId: next.payout.payout_id,
+      providerTransactionId: next.payout.payout_id, providerStatus: 'COMPLETED', providerReference: next.payout.payout_id,
+      financeOperation: { ...consumedEvidence, hold_id: holdId }, verifiedAt: new Date() }), { code: 'PAYOUT_COMPLETION_CONFLICT' })
+    const listed = await repository.listForActor({ actor: admin,
+      filters: { limit: 25, offset: 0, sort: 'created_at', direction: 'desc' } })
+    assert.equal(listed.items.length, 1, 'history cannot duplicate a request list row')
+    assert.equal(listed.items[0].payout_state, 'PENDING')
+    assert.equal(listed.items[0].payout_error_code, null, 'an old failure cannot leak into the current attempt')
+    const recovery = await payouts.listRecovery({})
+    assert.equal(recovery.items.length, 1)
+    assert.equal(recovery.items[0].payout_id, next.payout.payout_id)
+    assert.equal(recovery.items[0].retry_allowed, false)
+    await payouts.completePayout({ actor: admin, requestId, payoutId: next.payout.payout_id,
+      providerTransactionId: next.payout.payout_id, providerStatus: 'COMPLETED', providerReference: next.payout.payout_id,
+      financeOperation: consumedEvidence, verifiedAt: new Date() })
+    const history = await pool.query(`SELECT payout_id, state, reservation_operation_id, reservation_hold_id, reservation_state
+      FROM pg_temp.request_payout_attempts WHERE request_id = $1 ORDER BY created_at, payout_id`, [requestId])
+    assert.equal(history.rows.length, 3)
+    assert.deepEqual(history.rows.find((row) => row.payout_id === adminApproved.payout.payout_id), {
+      payout_id: adminApproved.payout.payout_id, state: 'FAILED', reservation_operation_id: operationId,
+      reservation_hold_id: holdId, reservation_state: 'RELEASED',
+    })
+    assert.equal(history.rows.find((row) => row.payout_id === next.payout.payout_id).reservation_state, 'CONSUMED')
+    const finalDecisions = await pool.query('SELECT stage, action FROM request_decisions WHERE request_id = $1 ORDER BY stage', [requestId])
+    assert.deepEqual(finalDecisions.rows, [{ stage: 'admin', action: 'approve' }, { stage: 'manager', action: 'approve' }])
+
   } finally {
     await pool.end()
   }
