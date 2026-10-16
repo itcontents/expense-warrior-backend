@@ -121,7 +121,8 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
     const { createPayoutDestinationService } = require('./payoutDestinations/payoutDestinationService')
     const requestRepository = createRequestRepository({ pool })
     if (staffPayoutsEnabled === true) {
-      if (!paymentProviders || !itcFinanceClient || !phoneVault) {
+      if (!paymentProviders || typeof paymentProviders.getForOperation !== 'function' ||
+          typeof paymentProviders.getNetworks !== 'function' || !itcFinanceClient || !phoneVault) {
         throw new TypeError('Payouts require the signed provider, ITC finance, and destination vault integrations')
       }
       const { createStaffPayoutRouter } = require('./payouts/staffPayoutRoutes')

@@ -27,6 +27,9 @@ const request = {
     payout_attempt_id: attemptId,
     consume_operation_id: consumeOperationId,
     state: 'SUBMITTING',
+    request_id: requestId,
+    reservation_hold_id: holdId,
+    reservation_state: 'RESERVED',
     provider_code: 'pawapay',
     provider_account_id: providerAccountId,
     provider_account_version: providerAccountVersion,
@@ -42,6 +45,9 @@ function makeHarness({ prepared = {}, preparedSequence = [], initiation, status,
   providerRegistry = null, payoutDestination = destination } = {}) {
   const calls = []
   const repository = {
+    preparePayoutRetry: async () => assert.fail('unexpected retry'),
+    completeRetryReservation: async () => assert.fail('unexpected retry completion'),
+    markRetryReservationFailure: async () => assert.fail('unexpected retry failure'),
     prepareFinalApproval: async (input) => {
       calls.push(['prepareFinalApproval', input])
       return preparedSequence.length ? preparedSequence.shift() : { request, payout: request.payout, shouldInitiate: true, ...prepared }
@@ -94,6 +100,7 @@ function makeHarness({ prepared = {}, preparedSequence = [], initiation, status,
     repository,
     providerRegistry: providerRegistry || {
       get: () => provider,
+      getForOperation: () => provider,
       getNetworks: (providerCode) => [{ provider_code: providerCode, code: 'ZAMTEL_ZMB', label: 'Zamtel' }],
       getAccountIdentity: () => ({ provider_account_id: providerAccountId, provider_account_version: providerAccountVersion }),
     },
@@ -101,7 +108,7 @@ function makeHarness({ prepared = {}, preparedSequence = [], initiation, status,
     phoneVault: { decrypt: (value) => value },
     now: () => Date.parse('2026-10-15T10:00:00.000Z'),
   })
-  return { service, calls }
+  return { service, calls, repository, provider, financeClient }
 }
 
 function completedStatus(overrides = {}) {
@@ -314,4 +321,279 @@ test('admin final approval reserves funds itself for a staff request without a m
   assert.equal(calls.filter(([name]) => name === 'setAdminReservationAccountingSnapshot').length, 1)
   assert.equal(calls.filter(([name]) => name === 'completeAdminReservation').length, 1)
   assert.equal(calls.filter(([name]) => name === 'initiatePayout').length, 1)
+})
+
+
+const retryPayoutId = '31000000-0000-4000-8000-000000000003'
+const retryHoldId = '41000000-0000-4000-8000-000000000004'
+const retryOperationId = '51000000-0000-4000-8000-000000000005'
+function retryHarness({ reserveError, reservePatch = {}, completionWinner = true } = {}) {
+  const h = makeHarness()
+  const retryRequest = { ...request, status: 'PAYOUT_PENDING', finance_hold_id: null,
+    finance_expense_account_code: '6280', finance_reservation_state: 'PENDING' }
+  const payout = { ...request.payout, payout_id: retryPayoutId, state: 'RESERVING',
+    reservation_operation_id: retryOperationId, reservation_idempotency_key: 'ewmr-persisted-retry',
+    reservation_hold_id: null, reservation_state: 'PENDING', client_reference_id: 'EW-PAY-persisted-retry' }
+  const reservation = { operationId: retryOperationId, idempotencyKey: 'ewmr-persisted-retry',
+    expenseCategoryCode: 'office_supplies', expenseAccountCode: '6280', amount: '25.00', currency: 'ZMW',
+    requesterCustomerId: request.requester_customer_id, providerCode: 'pawapay', providerAccountId, providerAccountVersion }
+  h.repository.preparePayoutRetry = async (input) => {
+    h.calls.push(['preparePayoutRetry', input])
+    return { request: retryRequest, payout, reservation, requiresReservation: true, shouldInitiate: false }
+  }
+  let claimed = false
+  h.repository.completeRetryReservation = async (input) => {
+    h.calls.push(['completeRetryReservation', input])
+    const shouldInitiate = !claimed && completionWinner
+    claimed = true
+    return { request: { ...retryRequest, finance_hold_id: retryHoldId, finance_reservation_state: 'RESERVED' },
+      payout: { ...payout, state: 'SUBMITTING', reservation_hold_id: retryHoldId, reservation_state: 'RESERVED' }, shouldInitiate }
+  }
+  h.repository.markRetryReservationFailure = async (input) => {
+    h.calls.push(['markRetryReservationFailure', input])
+    return { request: { ...retryRequest, status: input.state === 'FAILED' ? 'PAYOUT_FAILED' : 'PAYOUT_PENDING' } }
+  }
+  h.financeClient.reserve = async (...args) => {
+    h.calls.push(['reserve', ...args])
+    if (reserveError) throw reserveError
+    return { operation: { operation_id: retryOperationId, request_id: requestId, hold_id: retryHoldId,
+      state: 'ACTIVE', amount: '25.00', currency: 'ZMW', expense_category_code: 'office_supplies',
+      expense_account_code: '6280', provider_code: 'pawapay', provider_account_id: providerAccountId,
+      provider_account_version: providerAccountVersion, ...reservePatch } }
+  }
+  h.provider.initiatePayout = async (input) => {
+    h.calls.push(['initiatePayout', input])
+    return { transaction_id: input.transaction_id, outcome: 'ACCEPTED' }
+  }
+  h.provider.getPayoutStatus = async (id) => {
+    h.calls.push(['getPayoutStatus', id])
+    return { transaction_id: id, outcome: 'PENDING' }
+  }
+  h.payout = payout
+  h.reservation = reservation
+  return h
+}
+
+test('retry requires an active admin and a valid request ID before repository access', async () => {
+  const { service, calls } = retryHarness()
+  for (const [candidate, id, code] of [
+    [{ ...actor, role: 'staff' }, requestId, 'FORBIDDEN'],
+    [{ ...actor, active: false }, requestId, 'AUTHENTICATION_REQUIRED'],
+    [actor, 'bad', 'INVALID_REQUEST'],
+  ]) await assert.rejects(service.retry(candidate, id), { code })
+  assert.equal(calls.length, 0)
+})
+
+test('retry forwards admin identity and propagates locked eligibility and self-review rejections without financial calls', async () => {
+  for (const code of ['SELF_REVIEW_PROHIBITED', 'PAYOUT_RETRY_NOT_ALLOWED']) {
+    const h = retryHarness()
+    h.repository.preparePayoutRetry = async (input) => {
+      assert.deepEqual(input, { actor: { customerId: actor.customerId, role: 'admin' }, requestId, requestIdForAudit: 'audit' })
+      throw Object.assign(new Error(code), { code, statusCode: 409 })
+    }
+    await assert.rejects(h.service.retry(actor, requestId, 'audit'), { code })
+    assert.equal(h.calls.length, 0)
+  }
+})
+
+test('retry reserves the persisted operation and saved account before submitting the new payout ID without another approval', async () => {
+  const h = retryHarness()
+  const result = await h.service.retry(actor, requestId, 'audit')
+  assert.equal(result.pending, true)
+  const reserve = h.calls.find(([name]) => name === 'reserve')
+  assert.deepEqual(reserve.slice(1), [{ operation_id: retryOperationId, request_id: requestId,
+    requester_customer_id: request.requester_customer_id, actor_customer_id: actor.customerId,
+    amount: '25.00', currency: 'ZMW', expense_category_code: 'office_supplies', provider_code: 'pawapay',
+    provider_account_id: providerAccountId, provider_account_version: 2, purpose: `Expense request ${requestId}` },
+    'ewmr-persisted-retry', 'audit'])
+  assert.equal(h.calls.find(([name]) => name === 'initiatePayout')[1].transaction_id, retryPayoutId)
+  assert.ok(h.calls.findIndex(([name]) => name === 'completeRetryReservation') < h.calls.findIndex(([name]) => name === 'initiatePayout'))
+  assert.equal(h.calls.some(([name]) => /FinalApproval|AdminReservation|getExpenseCategories/.test(name)), false)
+})
+
+for (const [field, value] of Object.entries({ operation_id: consumeOperationId, request_id: payoutId,
+  hold_id: 'bad', state: 'RELEASED', amount: '24.00', currency: 'USD', expense_category_code: 'travel',
+  expense_account_code: '9999', provider_code: 'other', provider_account_id: payoutId, provider_account_version: 3 })) {
+  test(`retry quarantines a reservation with mismatched ${field} without contacting provider`, async () => {
+    const h = retryHarness({ reservePatch: { [field]: value } })
+    const result = await h.service.retry(actor, requestId)
+    assert.equal(result.pending, true)
+    assert.equal(result.errorCode, 'ITC_FINANCE_RESPONSE_INVALID')
+    assert.equal(h.calls.find(([name]) => name === 'markRetryReservationFailure')[1].state, 'UNKNOWN')
+    assert.equal(h.calls.some(([name]) => ['initiatePayout', 'getPayoutStatus', 'completeRetryReservation'].includes(name)), false)
+  })
+}
+
+test('unknown reservation result replays exactly the persisted attempt, operation and key', async () => {
+  const h = retryHarness({ reserveError: Object.assign(new Error('private text'), { code: 'ITC_FINANCE_UNAVAILABLE' }) })
+  for (let i = 0; i < 2; i++) {
+    const result = await h.service.retry(actor, requestId)
+    assert.equal(result.pending, true)
+    assert.equal(result.errorCode, 'ITC_FINANCE_UNAVAILABLE')
+  }
+  const reserves = h.calls.filter(([name]) => name === 'reserve')
+  assert.deepEqual(reserves[0], reserves[1])
+  const failures = h.calls.filter(([name]) => name === 'markRetryReservationFailure')
+  assert.ok(failures.every(([, input]) => input.payoutId === retryPayoutId && input.operationId === retryOperationId && input.state === 'UNKNOWN'))
+  assert.equal(h.calls.some(([name]) => /PayoutStatus|initiatePayout/.test(name)), false)
+})
+
+test('definitive reservation rejection records a terminal reservation failure with no provider operation', async () => {
+  const h = retryHarness({ reserveError: Object.assign(new Error('private text'), { code: 'INSUFFICIENT_FUNDS' }) })
+  const result = await h.service.retry(actor, requestId)
+  assert.equal(result.pending, false)
+  assert.equal(result.request.status, 'PAYOUT_FAILED')
+  assert.equal(result.errorCode, 'INSUFFICIENT_FUNDS')
+  assert.equal(h.calls.find(([name]) => name === 'markRetryReservationFailure')[1].state, 'FAILED')
+  assert.equal(h.calls.some(([name]) => ['initiatePayout', 'getPayoutStatus', 'recordInitiation'].includes(name)), false)
+})
+
+test('concurrent reservation completions submit only the repository winner', async () => {
+  const h = retryHarness()
+  await Promise.all([h.service.retry(actor, requestId), h.service.retry(actor, requestId)])
+  assert.equal(h.calls.filter(([name]) => name === 'initiatePayout').length, 1)
+  assert.equal(h.calls.filter(([name]) => name === 'getPayoutStatus').length, 1)
+})
+
+test('a reservation completion loser returns pending without initiating or reconciling', async () => {
+  const h = retryHarness({ completionWinner: false })
+  assert.equal((await h.service.retry(actor, requestId)).pending, true)
+  assert.equal(h.calls.some(([name]) => ['initiatePayout', 'getPayoutStatus'].includes(name)), false)
+})
+
+test('retry fails closed when the saved account version is unavailable', async () => {
+  const h = retryHarness()
+  // A current-account fallback must never run a retry with changed credentials.
+  h.provider.initiatePayout = async () => assert.fail('provider must not be called')
+  const strict = createStaffPayoutService({ repository: h.repository, financeClient: h.financeClient,
+    phoneVault: { decrypt() {} }, providerRegistry: { get: () => h.provider, getForOperation: () => { throw Error('unavailable') } } })
+  await assert.rejects(strict.retry(actor, requestId), { code: 'PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE' })
+  assert.equal(h.calls.some(([name]) => name === 'reserve'), false)
+})
+
+test('retry selects the persisted account version without consulting the current account', async () => {
+  const h = retryHarness()
+  const selected = []
+  const strict = createStaffPayoutService({ repository: h.repository, financeClient: h.financeClient,
+    phoneVault: { decrypt() {} }, providerRegistry: { get: () => h.provider,
+      getNetworks: () => [{ code: 'ZAMTEL_ZMB' }], getAccountIdentity: () => assert.fail('current account lookup'),
+      getForOperation: (...args) => { selected.push(args); return h.provider } } })
+  await strict.retry(actor, requestId)
+  assert.ok(selected.length > 0)
+  assert.ok(selected.every((args) => args[0] === 'pawapay' && args[2].provider_account_id === providerAccountId && args[2].provider_account_version === 2))
+})
+
+for (const state of ['RESERVING', 'RESERVATION_FAILED']) {
+  test(`reconcile never sends reservation-only ${state} attempts to the provider`, async () => {
+    const h = makeHarness()
+    h.repository.preparePayoutReconciliation = async () => ({ request, payout: { ...request.payout, state, reservation_hold_id: null } })
+    const result = await h.service.reconcile(actor, requestId)
+    assert.equal(result.pending, state === 'RESERVING')
+    assert.equal(h.calls.length, 0)
+  })
+}
+
+test('consumption uses and validates the selected attempt hold despite a different request hold', async () => {
+  const h = makeHarness({ status: completedStatus() })
+  h.repository.preparePayoutReconciliation = async () => ({ request: { ...request, finance_hold_id: retryHoldId }, payout: request.payout })
+  assert.equal((await h.service.reconcile(actor, requestId)).request.status, 'PAID')
+  assert.equal(h.calls.find(([name]) => name === 'consume')[1], holdId)
+})
+
+test('release fails closed if the repository release operation targets a different attempt hold', async () => {
+  const h = makeHarness({ status: completedStatus({ status: 'FAILED' }) })
+  h.repository.prepareRelease = async () => ({ operation: { holdId: retryHoldId, operationId: consumeOperationId, idempotencyKey: 'ew-release' } })
+  const result = await h.service.reconcile(actor, requestId)
+  assert.equal(result.pending, true)
+  assert.equal(h.calls.some(([name]) => name === 'release'), false)
+})
+
+test('retry requires an explicit boolean submission claim', async () => {
+  const h = retryHarness()
+  h.repository.completeRetryReservation = async () => ({ request, payout: request.payout, shouldInitiate: 'true' })
+  await h.service.retry(actor, requestId)
+  assert.equal(h.calls.some(([name]) => name === 'initiatePayout'), false)
+})
+
+test('retry treats rejected reused-hold completion as unresolved without a provider operation', async () => {
+  const h = retryHarness()
+  h.repository.completeRetryReservation = async () => { throw Object.assign(Error('old hold already used'), { code: 'FINANCE_RESERVATION_MISMATCH' }) }
+  assert.equal((await h.service.retry(actor, requestId)).pending, true)
+  assert.equal(h.calls.some(([name]) => ['initiatePayout', 'getPayoutStatus'].includes(name)), false)
+})
+
+test('retry returns a fixed recovery error when recording an unknown reservation fails', async () => {
+  const h = retryHarness({ reserveError: Error('secret provider text') })
+  h.repository.markRetryReservationFailure = async () => { throw Error('private database details') }
+  await assert.rejects(h.service.retry(actor, requestId), { code: 'PAYOUT_RECONCILIATION_REQUIRED' })
+  assert.equal(h.calls.some(([name]) => name === 'initiatePayout'), false)
+})
+
+test('retry completes payment against its own new hold and persists the new payout identity', async () => {
+  const h = retryHarness()
+  h.provider.getPayoutStatus = async (id) => ({ ...completedStatus(), transaction_id: id,
+    evidence: { ...completedStatus().evidence, client_reference: 'EW-PAY-persisted-retry' } })
+  h.financeClient.consume = async (...args) => {
+    h.calls.push(['consume', ...args])
+    return { operation: { operation_id: consumeOperationId, request_id: requestId, hold_id: retryHoldId,
+      state: 'CONSUMED', amount: '25.00', currency: 'ZMW', expense_category_code: 'office_supplies',
+      payout_attempt_id: attemptId, provider_transaction_id: providerTransactionId, provider_code: 'pawapay',
+      provider_account_id: providerAccountId, provider_account_version: 2 } }
+  }
+  assert.equal((await h.service.retry(actor, requestId)).request.status, 'PAID')
+  assert.equal(h.calls.find(([name]) => name === 'consume')[1], retryHoldId)
+  assert.equal(h.calls.find(([name]) => name === 'completePayout')[1].payoutId, retryPayoutId)
+})
+
+test('retry provider rejection releases only its own new hold and records a safe provider code', async () => {
+  const h = retryHarness()
+  h.provider.initiatePayout = async (input) => ({ transaction_id: input.transaction_id, outcome: 'REJECTED',
+    rejection_code: 'BAD CODE private details', message: 'provider confidential text' })
+  h.repository.prepareRelease = async (input) => {
+    h.calls.push(['prepareRelease', input])
+    return { operation: { holdId: retryHoldId, operationId: consumeOperationId, idempotencyKey: 'retry-release-key' } }
+  }
+  h.financeClient.release = async (...args) => {
+    h.calls.push(['release', ...args])
+    return { operation: { operation_id: consumeOperationId, request_id: requestId, hold_id: retryHoldId,
+      provider_code: 'pawapay', provider_account_id: providerAccountId, provider_account_version: 2, state: 'RELEASED' } }
+  }
+  const result = await h.service.retry(actor, requestId)
+  assert.equal(result.request.status, 'PAYOUT_FAILED')
+  assert.equal(h.calls.find(([name]) => name === 'release')[1], retryHoldId)
+  assert.equal(h.calls.find(([name]) => name === 'prepareRelease')[1].payoutId, retryPayoutId)
+  assert.equal(h.calls.find(([name]) => name === 'recordInitiation')[1].errorCode, 'PROVIDER_REJECTED')
+  assert.equal(JSON.stringify(result).includes('private'), false)
+})
+
+for (const [state, releaseState, requestState] of [
+  ['SUBMITTING', null, 'PAYOUT_PENDING'], ['PENDING', null, 'PAYOUT_PENDING'], ['UNKNOWN', null, 'PAYOUT_PENDING'],
+  ['VERIFICATION_REQUIRED', null, 'PAYOUT_PENDING'], ['FAILED_PENDING_RELEASE', 'UNKNOWN', 'PAYOUT_PENDING'],
+  ['PAID', null, 'PAID'], ['FAILED', 'UNKNOWN', 'PAYOUT_FAILED'], ['FAILED', 'PENDING', 'PAYOUT_FAILED'],
+]) {
+  test(`retry service cannot reserve or submit when locked latest state is ${state}/${releaseState}`, async () => {
+    const h = makeHarness()
+    const client = { release() {}, async query(sql) {
+      if (sql.includes('SELECT request.request_id')) return { rows: [{ ...request, status: requestState }] }
+      if (sql.includes('FROM request_payout_attempts')) return { rows: [{ ...request.payout, state, release_state: releaseState }] }
+      if (/INSERT|UPDATE/.test(sql)) assert.fail('ineligible retry mutated persistence')
+      return { rows: [] }
+    } }
+    const real = createStaffPayoutRepository({ pool: { query: client.query, connect: async () => client } })
+    h.repository.preparePayoutRetry = real.preparePayoutRetry
+    await assert.rejects(h.service.retry(actor, requestId), { code: 'PAYOUT_RETRY_NOT_ALLOWED' })
+    assert.equal(h.calls.length, 0)
+  })
+}
+
+test('retry service cannot self-review through the locked repository authorization', async () => {
+  const h = makeHarness()
+  const client = { release() {}, async query(sql) {
+    if (sql.includes('SELECT request.request_id')) return { rows: [{ ...request, requester_customer_id: actor.customerId }] }
+    if (/INSERT|UPDATE/.test(sql)) assert.fail('self-review mutated persistence')
+    return { rows: [] }
+  } }
+  h.repository.preparePayoutRetry = createStaffPayoutRepository({ pool: { query: client.query, connect: async () => client } }).preparePayoutRetry
+  await assert.rejects(h.service.retry(actor, requestId), { code: 'SELF_REVIEW_PROHIBITED' })
+  assert.equal(h.calls.length, 0)
 })

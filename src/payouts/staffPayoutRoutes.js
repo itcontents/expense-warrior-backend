@@ -21,7 +21,7 @@ function respondWithError(res, error) {
 
 function createStaffPayoutRouter({ identityClient, payoutService } = {}) {
   if (!identityClient || !payoutService || typeof payoutService.finalApprove !== 'function' ||
-      typeof payoutService.reconcile !== 'function' || typeof payoutService.bulkFinalApprove !== 'function' ||
+      typeof payoutService.retry !== 'function' || typeof payoutService.reconcile !== 'function' || typeof payoutService.bulkFinalApprove !== 'function' ||
       typeof payoutService.listRecovery !== 'function') {
     throw new TypeError('ITC identity and staff payout services are required')
   }
@@ -43,6 +43,21 @@ function createStaffPayoutRouter({ identityClient, payoutService } = {}) {
       return res.status(result.pending ? 202 : 200).json({ data: {
         request: result.request,
         pending: result.pending,
+        ...(result.errorCode ? { error_code: result.errorCode } : {}),
+      } })
+    } catch (error) { return respondWithError(res, error) }
+  })
+
+  router.post('/requests/:request_id/payout/retry', requireSession, async (req, res) => {
+    const validId = Joi.string().guid({ version: ['uuidv4'] }).required().validate(req.params.request_id)
+    const validBody = Joi.object({}).unknown(false).validate(req.body === undefined ? {} : req.body, { convert: false })
+    if (validId.error || validBody.error || Object.keys(req.query).length) {
+      return res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'The payout retry request is invalid' } })
+    }
+    try {
+      const result = await payoutService.retry(req.actor, req.params.request_id, req.requestId)
+      return res.status(result.pending ? 202 : 200).json({ data: {
+        request: result.request, pending: result.pending,
         ...(result.errorCode ? { error_code: result.errorCode } : {}),
       } })
     } catch (error) { return respondWithError(res, error) }

@@ -55,6 +55,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
   if (!repository || typeof repository.prepareFinalApproval !== 'function' ||
       typeof repository.preparePayoutReconciliation !== 'function' ||
       typeof repository.setAdminReservationAccountingSnapshot !== 'function' ||
+      ['preparePayoutRetry', 'completeRetryReservation', 'markRetryReservationFailure'].some((method) => typeof repository[method] !== 'function') ||
       !providerRegistry || typeof providerRegistry.get !== 'function' ||
       !financeClient || typeof financeClient.reserve !== 'function' || typeof financeClient.consume !== 'function' || typeof financeClient.release !== 'function' ||
       typeof financeClient.getExpenseCategories !== 'function' ||
@@ -168,6 +169,10 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     if (prepared.replayed) return { request: prepared.request, pending: false, replayed: true }
     const operation = prepared.operation
     try {
+      if (!UUID.test(String(payout.reservation_hold_id || '')) ||
+          String(operation?.holdId).toLowerCase() !== payout.reservation_hold_id.toLowerCase()) {
+        throw new StaffPayoutServiceError('ITC_FINANCE_RESPONSE_INVALID', 502)
+      }
       const result = await financeClient.release(operation.holdId, {
         operation_id: operation.operationId,
         actor_customer_id: actor.customerId,
@@ -197,7 +202,15 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     }
   }
 
+  function reservationOnlyResult(request, payout) {
+    if (payout?.state === 'RESERVING') return { request, pending: true }
+    if (payout?.state === 'RESERVATION_FAILED') return { request, pending: false }
+    return null
+  }
+
   async function reconcilePrepared(actor, request, payout, requestIdForAudit) {
+    const reservationResult = reservationOnlyResult(request, payout)
+    if (reservationResult) return reservationResult
     let provider
     const accountIdentity = payout.provider_account_id && payout.provider_account_version
       ? { provider_account_id: payout.provider_account_id, provider_account_version: payout.provider_account_version }
@@ -264,7 +277,8 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     }
     let result
     try {
-      result = await financeClient.consume(request.finance_hold_id, consumePayload,
+      if (!UUID.test(String(payout.reservation_hold_id || ''))) throw new StaffPayoutServiceError('ITC_FINANCE_RESPONSE_INVALID', 502)
+      result = await financeClient.consume(payout.reservation_hold_id, consumePayload,
         consumeIdempotencyKey(response.evidence.provider_transaction_id), requestIdForAudit)
     } catch (error) {
       const code = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'ITC_FINANCE_UNAVAILABLE'
@@ -274,7 +288,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     const financeOperation = result?.operation
     if (!financeOperation || String(financeOperation.operation_id).toLowerCase() !== String(payout.consume_operation_id).toLowerCase() ||
         String(financeOperation.request_id).toLowerCase() !== String(request.request_id).toLowerCase() ||
-        String(financeOperation.hold_id).toLowerCase() !== String(request.finance_hold_id).toLowerCase() ||
+        String(financeOperation.hold_id).toLowerCase() !== String(payout.reservation_hold_id).toLowerCase() ||
         financeOperation.provider_code !== (payout.provider_code || 'pawapay') ||
         String(financeOperation.provider_account_id).toLowerCase() !== String(payout.provider_account_id).toLowerCase() ||
         Number(financeOperation.provider_account_version) !== Number(payout.provider_account_version) ||
@@ -377,8 +391,15 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
         return { request: { request_id: requestId, status: 'PENDING_ADMIN' }, pending: true, errorCode: code }
       }
     }
+    return submitPrepared(actor, prepared, requestIdForAudit)
+  }
+
+  async function submitPrepared(actor, prepared, requestIdForAudit) {
     const request = prepared.request
     const payout = prepared.payout
+    const requestId = request?.request_id
+    const reservationResult = reservationOnlyResult(request, payout)
+    if (reservationResult) return reservationResult
     if (!request || !payout) throw new StaffPayoutServiceError('PAYOUT_PREPARATION_INVALID', 503)
     if (prepared.shouldInitiate) {
       const destination = await revealDestination(actor, requestId, requestIdForAudit, payout.network_code, payout.provider_code)
@@ -418,6 +439,79 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
       }
     }
     return reconcilePrepared(actor, request, payout, requestIdForAudit)
+  }
+
+  async function retry(actor, requestId, requestIdForAudit = null) {
+    assertAdmin(actor)
+    if (!UUID.test(String(requestId || ''))) throw new StaffPayoutServiceError('INVALID_REQUEST', 400)
+    const admin = { customerId: actor.customerId, role: 'admin' }
+    const prepared = await repository.preparePayoutRetry({ actor: admin, requestId, requestIdForAudit })
+    const { request, payout, reservation } = prepared
+    if (!request || !payout || !prepared.requiresReservation || payout.state !== 'RESERVING' ||
+        String(request.request_id).toLowerCase() !== requestId.toLowerCase() ||
+        !UUID.test(String(payout.payout_id || '')) || !reservation ||
+        !UUID.test(String(reservation.operationId || '')) || reservation.operationId !== payout.reservation_operation_id ||
+        !/^[A-Za-z0-9._:-]{8,128}$/.test(String(reservation.idempotencyKey || '')) ||
+        reservation.idempotencyKey !== payout.reservation_idempotency_key ||
+        reservation.requesterCustomerId !== request.requester_customer_id ||
+        reservation.amount !== payout.amount || reservation.amount !== request.amount ||
+        !/^(?:0|[1-9]\d{0,11})\.\d{2}$/.test(String(reservation.amount || '')) ||
+        reservation.amount === '0.00' || reservation.currency !== 'ZMW' || reservation.currency !== payout.currency ||
+        reservation.currency !== request.currency ||
+        !/^[a-z][a-z0-9_]{1,49}$/.test(String(reservation.expenseCategoryCode || '')) ||
+        reservation.expenseCategoryCode !== request.finance_expense_category_code ||
+        !/^\d{4}$/.test(String(reservation.expenseAccountCode || '')) ||
+        reservation.expenseAccountCode !== request.finance_expense_account_code ||
+        reservation.providerCode !== payout.provider_code ||
+        !UUID.test(String(reservation.providerAccountId || '')) || reservation.providerAccountId !== payout.provider_account_id ||
+        !Number.isSafeInteger(reservation.providerAccountVersion) || reservation.providerAccountVersion < 1 ||
+        reservation.providerAccountVersion !== payout.provider_account_version) {
+      throw new StaffPayoutServiceError('PAYOUT_RETRY_PREPARATION_INVALID')
+    }
+    // The registry must resolve this exact saved account version, never current routing.
+    try {
+      if (typeof providerRegistry.getForOperation !== 'function' || !providerRegistry.getForOperation(payout.provider_code, 'payout', {
+        provider_account_id: payout.provider_account_id, provider_account_version: payout.provider_account_version,
+      })) throw new Error('Unavailable account')
+    } catch (_error) { throw new StaffPayoutServiceError('PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE') }
+    let completed
+    try {
+      const result = await financeClient.reserve({
+        operation_id: reservation.operationId, request_id: requestId,
+        requester_customer_id: reservation.requesterCustomerId, actor_customer_id: actor.customerId,
+        amount: reservation.amount, currency: reservation.currency,
+        expense_category_code: reservation.expenseCategoryCode, provider_code: reservation.providerCode,
+        provider_account_id: reservation.providerAccountId, provider_account_version: reservation.providerAccountVersion,
+        purpose: `Expense request ${requestId}`,
+      }, reservation.idempotencyKey, requestIdForAudit)
+      const operation = result?.operation
+      if (!operation || String(operation.operation_id).toLowerCase() !== reservation.operationId.toLowerCase() ||
+          String(operation.request_id).toLowerCase() !== requestId.toLowerCase() ||
+          operation.amount !== reservation.amount || operation.currency !== reservation.currency ||
+          operation.state !== 'ACTIVE' || !UUID.test(String(operation.hold_id || '')) ||
+          operation.expense_category_code !== reservation.expenseCategoryCode || operation.expense_account_code !== reservation.expenseAccountCode ||
+          operation.provider_code !== reservation.providerCode ||
+          String(operation.provider_account_id).toLowerCase() !== reservation.providerAccountId.toLowerCase() ||
+          Number(operation.provider_account_version) !== reservation.providerAccountVersion) {
+        throw new StaffPayoutServiceError('ITC_FINANCE_RESPONSE_INVALID', 502)
+      }
+      completed = await repository.completeRetryReservation({ actor: admin, requestId, payoutId: payout.payout_id,
+        reservation, financeOperation: operation, requestIdForAudit })
+    } catch (error) {
+      const code = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'ITC_FINANCE_UNAVAILABLE'
+      const definitive = new Set(['INSUFFICIENT_FUNDS', 'TREASURY_MAPPING_UNAVAILABLE', 'TREASURY_ACCOUNT_UNAVAILABLE',
+        'PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE', 'EXPENSE_CATEGORY_NOT_POSTABLE', 'IDENTITY_UNAVAILABLE', 'INVALID_RESERVATION']).has(code)
+      let failed
+      try {
+        failed = await repository.markRetryReservationFailure({ actor: admin, requestId, payoutId: payout.payout_id,
+          operationId: reservation.operationId, state: definitive ? 'FAILED' : 'UNKNOWN', errorCode: code, requestIdForAudit })
+      } catch (_error) { throw new StaffPayoutServiceError('PAYOUT_RECONCILIATION_REQUIRED') }
+      return { request: failed.request, pending: !definitive, errorCode: code }
+    }
+    if (completed.shouldInitiate !== true) {
+      return { request: completed.request, pending: !['PAID', 'PAYOUT_FAILED'].includes(completed.request?.status), replayed: true }
+    }
+    return submitPrepared(actor, completed, requestIdForAudit)
   }
 
   async function reconcile(actor, requestId, requestIdForAudit = null) {
@@ -461,7 +555,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     return repository.listRecovery({ limit: parsedLimit, offset: parsedOffset })
   }
 
-  return Object.freeze({ finalApprove, reconcile, bulkFinalApprove, listRecovery })
+  return Object.freeze({ finalApprove, retry, reconcile, bulkFinalApprove, listRecovery })
 }
 
 module.exports = { createStaffPayoutService, StaffPayoutServiceError, matchesPayout, evidenceDigest }
