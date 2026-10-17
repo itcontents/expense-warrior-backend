@@ -62,3 +62,13 @@ Using the same guarded audit role, read-only catalog queries compared the live `
 - The release-ledger result is unchanged: `local_staging` has a 133 entry but no 134/135 entries. In `itc`, the audit role cannot access `public` to read ledger rows.
 
 This verifies a close match in the inspected live schema shape. It does not prove that the guarded migration runner applied the exact source files, that function bodies match byte-for-byte, or that the migration ledger contains matching 134/135 checksums. Do not treat this catalog comparison as permission to enable finance operations or as a substitute for ledger access. No business rows were read, and no database or provider writes were performed.
+
+## Read-only release-gate recheck — 18 October 2026
+
+Using `scripts/codex_db.js` from the primary `itcstore-backend` checkout, each query ran in a read-only transaction after the helper asserted the `shopit_accounting_audit` login. No credentials were printed.
+
+- In `local_staging`, `public.commerce_schema_migrations` is visible with columns `migration_name`, `checksum_sha256`, `apply_status`, and `applied_at`. A query for the exact source migration names 134 through 140 returned no rows. This does not establish schema absence; it means those source filenames are not recorded in the ledger visible to this reader.
+- In `itc`, the helper can connect as `shopit_accounting_audit`, but `information_schema.tables` and `information_schema.columns` expose no migration relation to that role. Exact migration-ledger state therefore remains unverifiable there.
+- The refreshed `local_staging` COA shows account 1020 (`PawaPay Clearing – ZMW`) active and postable, 1100 (`Trade Receivables`) inactive and non-postable, 2000 (`Customer Advances / Unearned Sales`) active and postable, and 2020 (`Customer Credit Payable`) active and postable. A/R collection remains blocked by account 1100, apart from the unapplied A/R migrations.
+
+No DDL/DML, migration, provider call, or financial posting was performed. Keep ITC finance operations and A/R collection disabled until an authorized reader can verify the migration records/checksums in both targets, the required COA accounts are ready, and the separate provider and transaction-readiness gates pass.
