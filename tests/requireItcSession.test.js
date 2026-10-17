@@ -25,6 +25,20 @@ test('requireItcSession_rejectsMissingBackofficeCookie', async () => {
   assert.equal(nextCalled, false)
 })
 
+test('requireItcSession_rejectsLookalikeCookieNames', async () => {
+  let called = false
+  const middleware = createRequireItcSession({ getSession: async () => { called = true } })
+  const req = { headers: { cookie: 'not_itc_backoffice_access=invalid; itc_backoffice_access_backup=invalid' }, requestId: 'req-lookalike' }
+  const res = fakeResponse()
+  let nextCalled = false
+
+  await middleware(req, res, () => { nextCalled = true })
+
+  assert.equal(res.statusCode, 401)
+  assert.equal(called, false)
+  assert.equal(nextCalled, false)
+})
+
 test('requireItcSession_setsOnlyVerifiedItcActor', async () => {
   const middleware = createRequireItcSession({
     getSession: async () => ({ customerId: 'staff-1', role: 'staff', active: true }),

@@ -1,10 +1,12 @@
+const { hasBackofficeAccessCookie } = require('./cookieCsrfGuard')
+
 function createRequireItcSession(identityClient) {
   if (!identityClient || typeof identityClient.getSession !== 'function') {
     throw new TypeError('An ITC identity client is required')
   }
 
   return async function requireItcSession(req, res, next) {
-    if (!req.headers?.cookie || !req.headers.cookie.includes('itc_backoffice_access=')) {
+    if (!hasBackofficeAccessCookie(req.headers?.cookie)) {
       return res.status(401).json({
         error: { code: 'AUTHENTICATION_REQUIRED', message: 'Sign in to continue' },
       })
