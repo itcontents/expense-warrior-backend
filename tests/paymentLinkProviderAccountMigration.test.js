@@ -10,7 +10,8 @@ test('payment link attempts can retain the ITC provider account identity for A/R
   assert.match(migration, /ADD COLUMN provider_account_version integer/)
   assert.match(migration, /payment_link_attempts_provider_account_pair_check/)
   const migrations = await collectMigrations()
-  assert.equal(migrations.at(-1).name, '0015_staff_payout_retries.sql')
+  const names = migrations.map(({ name }) => name)
+  assert.ok(names.indexOf('0013_payment_link_provider_account_snapshot.sql') < names.indexOf('0015_staff_payout_retries.sql'))
 })
 
 test('provider add-on lifecycle migration generalizes operation identity without rewriting prior rows', async () => {

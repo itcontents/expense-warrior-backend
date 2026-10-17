@@ -78,3 +78,43 @@ test('wallet report denies non-admin callers before ITC or audit access', async 
   await assert.rejects(service.exportWalletHistory({ actor: { customerId: 'staff', role: 'staff' }, query, requestId: 'trace' }), { code: 'FORBIDDEN' })
   assert.equal(calls, 0)
 })
+
+test('payment-link collection export masks payer data, renders, and audits bounded safe metadata', async () => {
+  let audit
+  let repositoryInput
+  let rendered
+  const service = createReportService({
+    pool: { query: async (...args) => { audit = args; return { rowCount: 1 } } },
+    repository: { listPaymentLinkCollectionReport: async (input) => {
+      repositoryInput = input
+      return { items: [{ payer_last_four: '9783', amount: '15.00' }], has_more: false }
+    } },
+    formatters: { csv: () => '', pdf: async () => Buffer.from('%PDF-'), collectionsCsv: (rows) => { rendered = rows; return Buffer.from('collections') } },
+    clock: () => new Date('2026-10-15T12:00:00Z'),
+  })
+  const result = await service.exportPaymentLinkCollections({ actor: admin, query, requestId: 'trace-1' })
+  assert.equal(repositoryInput.limit, 10000)
+  assert.equal(result.content.toString(), 'collections')
+  assert.equal(result.filename, 'expense-warrior-payment-link-collections-2026-10-15-2026-10-15.csv')
+  assert.equal(rendered[0].payer_last_four, '9783')
+  assert.match(audit[0], /report\.payment_link_collections\.exported/)
+  assert.deepEqual(JSON.parse(audit[1][2]), { format: 'csv', range: 'today', from: '2026-10-15', to: '2026-10-15', row_count: 1 })
+})
+
+test('payment-link collection export rejects oversized PDFs before audit', async () => {
+  let auditCalls = 0
+  const service = createReportService({
+    pool: { query: async () => { auditCalls++ } },
+    repository: { listPaymentLinkCollectionReport: async ({ limit }) => ({ items: Array(limit).fill({ attempt_id: 'x' }), has_more: true }) },
+    formatters: { collectionsPdf: async () => Buffer.from('%PDF-') },
+  })
+  await assert.rejects(service.exportPaymentLinkCollections({ actor: admin, query: { range: 'today', format: 'pdf' }, requestId: 'trace' }), { code: 'REPORT_TOO_LARGE' })
+  assert.equal(auditCalls, 0)
+})
+
+test('payment-link collection export denies non-admin before data or audit access', async () => {
+  let calls = 0
+  const service = createReportService({ pool: { query: async () => { calls++ } }, repository: { listPaymentLinkCollectionReport: async () => { calls++ } } })
+  await assert.rejects(service.exportPaymentLinkCollections({ actor: { customerId: 'staff', role: 'staff' }, query, requestId: 'trace' }), { code: 'FORBIDDEN' })
+  assert.equal(calls, 0)
+})

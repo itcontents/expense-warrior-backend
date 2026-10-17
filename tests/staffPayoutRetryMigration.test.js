@@ -9,8 +9,8 @@ const readMigration = () => fs.readFileSync(migrationPath, 'utf8')
 
 test('staff payout retry migration follows the provider lifecycle migration', async () => {
   const names = (await collectMigrations()).map(({ name }) => name)
-  assert.equal(names.at(-1), '0015_staff_payout_retries.sql')
-  assert.equal(names.at(-2), '0014_provider_addon_lifecycle.sql')
+  assert.equal(names[names.indexOf('0015_staff_payout_retries.sql') - 1], '0014_provider_addon_lifecycle.sql')
+  assert.ok(names.indexOf('0015_staff_payout_retries.sql') < names.indexOf('0016_payment_link_attempts_report_created_idx.sql'))
 })
 
 test('retry migration removes only the request uniqueness and retains payout identities', () => {

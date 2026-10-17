@@ -34,6 +34,28 @@ function createReportRepository({ pool }) {
       const hasMore = result.rows.length > limit
       return { items: hasMore ? result.rows.slice(0, limit) : result.rows, has_more: hasMore }
     },
+    async listPaymentLinkCollectionReport({ window, limit }) {
+      const result = await pool.query(`
+        SELECT a.created_at,
+               l.description,
+               l.collection_target_type,
+               a.amount::text AS amount,
+               a.currency,
+               a.state,
+               a.provider_code,
+               a.network_label,
+               RIGHT(a.payer_phone, 4) AS payer_last_four,
+               a.provider_reference,
+               a.provider_transaction_id
+          FROM payment_link_attempts a
+          JOIN payment_links l ON l.payment_link_id = a.payment_link_id
+         WHERE a.created_at >= $1 AND a.created_at < $2
+         ORDER BY a.created_at DESC, a.attempt_id DESC
+         LIMIT $3
+      `, [window.start, window.end, limit + 1])
+      const hasMore = result.rows.length > limit
+      return { items: hasMore ? result.rows.slice(0, limit) : result.rows, has_more: hasMore }
+    },
   })
 }
 

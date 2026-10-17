@@ -23,6 +23,7 @@ const walletFiltersSchema = Joi.object({
   from: Joi.string().pattern(datePattern).when('range', { is: 'custom', then: Joi.required(), otherwise: Joi.forbidden() }),
   to: Joi.string().pattern(datePattern).when('range', { is: 'custom', then: Joi.required(), otherwise: Joi.forbidden() }),
 }).unknown(false)
+const paymentLinkCollectionsFiltersSchema = walletFiltersSchema
 
 function createReportRouter({ identityClient, reportService }) {
   if (!reportService || typeof reportService.exportRequests !== 'function') throw new TypeError('A request report service is required')
@@ -89,7 +90,38 @@ function createReportRouter({ identityClient, reportService }) {
       return res.status(503).json({ error: { code: 'REPORT_UNAVAILABLE', message: 'The wallet history report is temporarily unavailable' } })
     }
   })
+  router.get('/admin/reports/payment-link-collections', requireSession, async (req, res) => {
+    if (String(req.actor.role || '').toLowerCase() !== 'admin') {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Admin permission is required' } })
+    }
+    const { value, error } = paymentLinkCollectionsFiltersSchema.validate(req.query, { abortEarly: false, convert: false })
+    if (error) return res.status(400).json({ error: { code: 'INVALID_REPORT_FILTER', message: 'Check the report date range and format' } })
+    try {
+      resolveReportWindow({ preset: value.range, from: value.from, to: value.to })
+    } catch (cause) {
+      if (cause instanceof ReportFilterError) return res.status(400).json({ error: { code: cause.code, message: cause.code.replaceAll('_', ' ').toLowerCase() } })
+      return res.status(400).json({ error: { code: 'INVALID_REPORT_FILTER', message: 'Check the report date and range' } })
+    }
+    try {
+      const result = await reportService.exportPaymentLinkCollections({
+        actor: req.actor,
+        query: { range: value.range, from: value.from, to: value.to, format: value.format },
+        requestId: req.requestId,
+      })
+      res.set({
+        'Content-Type': result.contentType,
+        'Content-Disposition': `attachment; filename="${result.filename}"`,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Report-Row-Count': String(result.rowCount),
+      })
+      return res.status(200).send(result.content)
+    } catch (cause) {
+      if (cause instanceof ReportServiceError) return res.status(cause.statusCode).json({ error: { code: cause.code, message: cause.code.replaceAll('_', ' ').toLowerCase() } })
+      return res.status(503).json({ error: { code: 'REPORT_UNAVAILABLE', message: 'The payment-link collections report is temporarily unavailable' } })
+    }
+  })
   return router
 }
 
-module.exports = { createReportRouter, filtersSchema, walletFiltersSchema }
+module.exports = { createReportRouter, filtersSchema, walletFiltersSchema, paymentLinkCollectionsFiltersSchema }

@@ -1,6 +1,6 @@
 const defaultRepositoryFactory = require('./reportRepository').createReportRepository
 const { resolveReportWindow, ReportFilterError } = require('./reportFilters')
-const { createCsvReport, createPdfReport, createWalletCsvReport, createWalletPdfReport, createXlsxReport, createWalletXlsxReport } = require('./reportFormats')
+const { createCsvReport, createPdfReport, createWalletCsvReport, createWalletPdfReport, createXlsxReport, createWalletXlsxReport, createPaymentLinkCollectionsCsvReport, createPaymentLinkCollectionsPdfReport, createPaymentLinkCollectionsXlsxReport } = require('./reportFormats')
 
 const CSV_MAX_ROWS = 10000
 const PDF_MAX_ROWS = 500
@@ -8,6 +8,13 @@ const WALLET_CSV_MAX_ROWS = 10000
 const WALLET_PDF_MAX_ROWS = 500
 const XLSX_MAX_ROWS = 10000
 const WALLET_XLSX_MAX_ROWS = 10000
+const COLLECTIONS_CSV_MAX_ROWS = 10000
+const COLLECTIONS_PDF_MAX_ROWS = 500
+const COLLECTIONS_XLSX_MAX_ROWS = 10000
+const COLLECTIONS_REPORT_FIELDS = Object.freeze([
+  'created_at', 'description', 'collection_target_type', 'amount', 'currency', 'state',
+  'provider_code', 'network_label', 'payer_last_four', 'provider_reference', 'provider_transaction_id',
+])
 
 class ReportServiceError extends Error {
   constructor(code, statusCode) {
@@ -21,7 +28,7 @@ class ReportServiceError extends Error {
 function createReportService({ pool, repository, formatters, itcFinanceClient, clock = () => new Date() }) {
   if (!pool || typeof pool.query !== 'function') throw new TypeError('A PostgreSQL-compatible pool is required')
   const reports = repository || defaultRepositoryFactory({ pool })
-  const renderers = formatters || { csv: createCsvReport, pdf: createPdfReport, xlsx: createXlsxReport, walletCsv: createWalletCsvReport, walletPdf: createWalletPdfReport, walletXlsx: createWalletXlsxReport }
+  const renderers = formatters || { csv: createCsvReport, pdf: createPdfReport, xlsx: createXlsxReport, walletCsv: createWalletCsvReport, walletPdf: createWalletPdfReport, walletXlsx: createWalletXlsxReport, collectionsCsv: createPaymentLinkCollectionsCsvReport, collectionsPdf: createPaymentLinkCollectionsPdfReport, collectionsXlsx: createPaymentLinkCollectionsXlsxReport }
   return Object.freeze({
     async exportRequests({ actor, query, requestId }) {
       if (String(actor?.role || '').toLowerCase() !== 'admin') throw new ReportServiceError('FORBIDDEN', 403)
@@ -111,6 +118,36 @@ function createReportService({ pool, repository, formatters, itcFinanceClient, c
         window,
       }
     },
+    async exportPaymentLinkCollections({ actor, query, requestId }) {
+      if (String(actor?.role || '').toLowerCase() !== 'admin') throw new ReportServiceError('FORBIDDEN', 403)
+      if (!['csv', 'pdf', 'xlsx'].includes(query?.format)) throw new ReportServiceError('INVALID_REPORT_FORMAT', 400)
+      let window
+      try {
+        window = resolveReportWindow({ preset: query.range, from: query.from, to: query.to, now: clock() })
+      } catch (error) {
+        if (error instanceof ReportFilterError) throw new ReportServiceError(error.code, error.statusCode)
+        throw error
+      }
+      const limit = query.format === 'pdf' ? COLLECTIONS_PDF_MAX_ROWS : query.format === 'xlsx' ? COLLECTIONS_XLSX_MAX_ROWS : COLLECTIONS_CSV_MAX_ROWS
+      const result = await reports.listPaymentLinkCollectionReport({ window, limit })
+      if (result.has_more) throw new ReportServiceError('REPORT_TOO_LARGE', 413)
+      const safeItems = result.items.map((item) => Object.fromEntries(COLLECTIONS_REPORT_FIELDS.map((field) => [field, item[field] ?? null])))
+      const renderer = query.format === 'csv' ? renderers.collectionsCsv : query.format === 'xlsx' ? renderers.collectionsXlsx : renderers.collectionsPdf
+      const content = await renderer(safeItems, window)
+      await pool.query(`
+        INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, request_id, metadata)
+        VALUES ($1, 'report.payment_link_collections.exported', 'payment_link_collection_report', NULL, $2, $3::jsonb)
+      `, [actor.customerId, requestId || null, JSON.stringify({
+        format: query.format, range: query.range, from: window.fromDate, to: window.toDate, row_count: result.items.length,
+      })])
+      return {
+        content,
+        contentType: reportContentType(query.format),
+        filename: `expense-warrior-payment-link-collections-${window.fromDate}-${window.toDate}.${query.format}`,
+        rowCount: safeItems.length,
+        window,
+      }
+    },
   })
 }
 
@@ -120,4 +157,4 @@ function reportContentType(format) {
   return 'application/pdf'
 }
 
-module.exports = { createReportService, ReportServiceError, CSV_MAX_ROWS, PDF_MAX_ROWS, WALLET_CSV_MAX_ROWS, WALLET_PDF_MAX_ROWS, XLSX_MAX_ROWS, WALLET_XLSX_MAX_ROWS }
+module.exports = { createReportService, ReportServiceError, CSV_MAX_ROWS, PDF_MAX_ROWS, WALLET_CSV_MAX_ROWS, WALLET_PDF_MAX_ROWS, XLSX_MAX_ROWS, WALLET_XLSX_MAX_ROWS, COLLECTIONS_CSV_MAX_ROWS, COLLECTIONS_PDF_MAX_ROWS, COLLECTIONS_XLSX_MAX_ROWS }

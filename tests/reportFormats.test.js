@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { createCsvReport, createPdfReport, createWalletCsvReport, createWalletPdfReport, createXlsxReport, createWalletXlsxReport, escapeSpreadsheetCell } = require('../src/reports/reportFormats')
+const { createCsvReport, createPdfReport, createWalletCsvReport, createWalletPdfReport, createXlsxReport, createWalletXlsxReport, createPaymentLinkCollectionsCsvReport, createPaymentLinkCollectionsPdfReport, createPaymentLinkCollectionsXlsxReport, escapeSpreadsheetCell } = require('../src/reports/reportFormats')
 
 const rows = [{ request_id: 'abc', requester_customer_id: 'user-1', category_name: 'Office', subcategory_name: null, amount: '50.00', currency: 'ZMW', status: 'PAID', submitted_at: '2026-10-15T10:00:00.000Z', latest_decision_action: 'approve' }]
 
@@ -44,4 +44,26 @@ test('XLSX exports keep untrusted values as text and expose stable request and w
   await wallet.xlsx.load(walletBook)
   assert.equal(wallet.getWorksheet('Wallet History').getCell('G4').value, '=unsafe')
   assert.equal(wallet.getWorksheet('Wallet History').getCell('G4').type, ExcelJS.ValueType.String)
+})
+
+test('payment-link collection CSV and PDF include provider references and masked payer only', async () => {
+  const collectionRows = [{ created_at: '2026-10-15T10:00:00.000Z', description: 'Customer payment', collection_target_type: 'revenue', amount: '25.00', currency: 'ZMW', state: 'SUCCEEDED', provider_code: 'pawapay', network_label: 'Airtel', payer_last_four: '9783', provider_reference: 'ref-123', provider_transaction_id: 'tx-456' }]
+  const csv = createPaymentLinkCollectionsCsvReport(collectionRows)
+  assert.match(csv, /created_at,description,target_type,amount,currency,state,provider,network,payer_last_four,provider_reference,provider_transaction_id/)
+  assert.match(csv, /9783,ref-123,tx-456/)
+  assert.doesNotMatch(csv, /260957909783/)
+  const pdf = await createPaymentLinkCollectionsPdfReport(collectionRows, { fromDate: '2026-10-15', toDate: '2026-10-15', timeZone: 'Africa/Lusaka' })
+  assert.equal(pdf.subarray(0, 5).toString(), '%PDF-')
+})
+
+test('payment-link collection XLSX exports untrusted provider fields as text', async () => {
+  const bookBytes = await createPaymentLinkCollectionsXlsxReport([{ created_at: '2026-10-15T10:00:00Z', description: '=1+1', collection_target_type: 'revenue', amount: '5.00', currency: 'ZMW', state: 'SUCCEEDED', provider_code: 'pawapay', network_label: 'Airtel', payer_last_four: '9783', provider_reference: '@SUM(A1)', provider_transaction_id: '+tx' }], { fromDate: '2026-10-15', toDate: '2026-10-15', timeZone: 'Africa/Lusaka' })
+  const ExcelJS = require('exceljs')
+  const workbook = new ExcelJS.Workbook()
+  await workbook.xlsx.load(bookBytes)
+  const sheet = workbook.getWorksheet('Link Collections')
+  assert.equal(sheet.getCell('B4').value, '=1+1')
+  assert.equal(sheet.getCell('B4').type, ExcelJS.ValueType.String)
+  assert.equal(sheet.getCell('J4').value, '@SUM(A1)')
+  assert.equal(sheet.getCell('J4').type, ExcelJS.ValueType.String)
 })

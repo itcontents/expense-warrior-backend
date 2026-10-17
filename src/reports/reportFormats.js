@@ -27,6 +27,18 @@ const XLSX_WALLET_COLUMNS = [
   ['currency', 'Currency'], ['running_balance', 'Running balance'], ['reference_type', 'Reference type'],
   ['reference_id', 'Reference ID'], ['payment_method', 'Payment method'],
 ]
+const COLLECTIONS_COLUMNS = [
+  ['created_at', 'created_at'], ['description', 'description'], ['collection_target_type', 'target_type'],
+  ['amount', 'amount'], ['currency', 'currency'], ['state', 'state'], ['provider_code', 'provider'],
+  ['network_label', 'network'], ['payer_last_four', 'payer_last_four'],
+  ['provider_reference', 'provider_reference'], ['provider_transaction_id', 'provider_transaction_id'],
+]
+const XLSX_COLLECTIONS_COLUMNS = [
+  ['created_at', 'Created at'], ['description', 'Description'], ['collection_target_type', 'Target type'],
+  ['amount', 'Amount'], ['currency', 'Currency'], ['state', 'State'], ['provider_code', 'Provider'],
+  ['network_label', 'Network'], ['payer_last_four', 'Payer last four'],
+  ['provider_reference', 'Provider reference'], ['provider_transaction_id', 'Provider transaction ID'],
+]
 
 async function createWorkbook(rows, window, { name, title, columns }) {
   const workbook = new ExcelJS.Workbook()
@@ -54,6 +66,10 @@ function createXlsxReport(rows, window) {
 
 function createWalletXlsxReport(rows, window) {
   return createWorkbook(rows, window, { name: 'Wallet History', title: 'Expense Warrior — Petty-cash wallet history', columns: XLSX_WALLET_COLUMNS })
+}
+
+function createPaymentLinkCollectionsXlsxReport(rows, window) {
+  return createWorkbook(rows, window, { name: 'Link Collections', title: 'Expense Warrior — Payment-link collections', columns: XLSX_COLLECTIONS_COLUMNS })
 }
 
 function escapeSpreadsheetCell(value) {
@@ -143,4 +159,40 @@ async function createWalletPdfReport(rows, window) {
   return completed
 }
 
-module.exports = { createCsvReport, createPdfReport, createWalletCsvReport, createWalletPdfReport, createXlsxReport, createWalletXlsxReport, escapeSpreadsheetCell }
+function createPaymentLinkCollectionsCsvReport(rows) {
+  const header = COLLECTIONS_COLUMNS.map(([, label]) => csvCell(label)).join(',')
+  const lines = rows.map((row) => COLLECTIONS_COLUMNS.map(([key]) => csvCell(row[key])).join(','))
+  return [header, ...lines].join('\r\n') + '\r\n'
+}
+
+async function createPaymentLinkCollectionsPdfReport(rows, window) {
+  const doc = new PDFDocument({ size: 'A4', margin: 44, autoFirstPage: true, compress: true })
+  const chunks = []
+  const completed = new Promise((resolve, reject) => {
+    doc.on('data', (chunk) => chunks.push(chunk))
+    doc.on('end', () => resolve(Buffer.concat(chunks)))
+    doc.on('error', reject)
+  })
+  const addHeading = () => {
+    doc.font('Helvetica-Bold').fontSize(17).fillColor('#18382e').text('Expense Warrior', { continued: false })
+    doc.moveDown(0.25).font('Helvetica-Bold').fontSize(12).fillColor('#18382e').text('Payment-link collections report')
+    doc.moveDown(0.2).font('Helvetica').fontSize(9).fillColor('#52645c').text(`Period: ${window.fromDate} to ${window.toDate} (${window.timeZone})`)
+    doc.text(`Collection attempts: ${rows.length} · Sorted newest first`)
+    doc.moveDown(0.8)
+  }
+  addHeading()
+  rows.forEach((row, index) => {
+    if (doc.y > 740) { doc.addPage(); addHeading() }
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#253d34')
+      .text(`${index + 1}. ${row.amount} ${row.currency} · ${String(row.state).replaceAll('_', ' ')}`)
+    doc.font('Helvetica').fontSize(8).fillColor('#52645c')
+      .text(`${row.description || 'Payment link'} · ${row.collection_target_type || 'Target unavailable'} · ${row.provider_code || 'Provider unavailable'} / ${row.network_label || 'Network unavailable'}`)
+      .text(`Payer ending ${row.payer_last_four || '—'} · Provider reference: ${row.provider_reference || 'Unavailable'} · Transaction: ${row.provider_transaction_id || 'Unavailable'}`)
+      .text(`Created: ${new Date(row.created_at).toISOString()}`)
+    doc.moveDown(0.45)
+  })
+  doc.end()
+  return completed
+}
+
+module.exports = { createCsvReport, createPdfReport, createWalletCsvReport, createWalletPdfReport, createXlsxReport, createWalletXlsxReport, createPaymentLinkCollectionsCsvReport, createPaymentLinkCollectionsPdfReport, createPaymentLinkCollectionsXlsxReport, escapeSpreadsheetCell }

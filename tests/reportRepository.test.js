@@ -19,3 +19,20 @@ test('request report returns at most the requested limit and flags overflow', as
   assert.deepEqual(result.items, [{ id: 1 }, { id: 2 }])
   assert.equal(result.has_more, true)
 })
+
+test('payment-link collection report is bounded, newest first, and returns only masked payer digits', async () => {
+  let call
+  const repository = createReportRepository({ pool: { query: async (...args) => {
+    call = args
+    return { rows: [{ payer_last_four: '9783' }, { payer_last_four: null }] }
+  } } })
+  const window = { start: '2026-10-14T22:00:00.000Z', end: '2026-10-15T22:00:00.000Z' }
+  const result = await repository.listPaymentLinkCollectionReport({ window, limit: 1 })
+  assert.match(call[0], /a\.created_at >= \$1 AND a\.created_at < \$2/)
+  assert.match(call[0], /ORDER BY a\.created_at DESC, a\.attempt_id DESC/)
+  assert.match(call[0], /LIMIT \$3/)
+  assert.match(call[0], /RIGHT\(a\.payer_phone, 4\) AS payer_last_four/)
+  assert.doesNotMatch(call[0], /SELECT\s+a\.payer_phone\s*,/i)
+  assert.deepEqual(call[1], [window.start, window.end, 2])
+  assert.deepEqual(result, { items: [{ payer_last_four: '9783' }], has_more: true })
+})
