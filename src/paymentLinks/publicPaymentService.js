@@ -12,6 +12,8 @@ const RECEIPT_NETWORKS = Object.freeze({
   ZAMTEL_ZMB: 'Zamtel Kwacha',
 })
 const isReceivableLink = (link) => link?.collection_target_type === 'AR_SETTLEMENT'
+const requiresCollectionPreflight = (link) =>
+  link?.collection_target_type === 'REVENUE' || link?.collection_target_type === 'CUSTOMER_CREDIT'
 const supportsPublicPhonePrompt = (network) =>
   network?.auth_type === 'PROVIDER_AUTH' && network?.pin_prompt === 'AUTOMATIC'
 
@@ -31,6 +33,24 @@ async function reserveReceivableAttempt(itcFinanceClient, link, attempt) {
     currency: attempt.currency,
   }, `ew-ar-reserve-${attempt.attempt_id}`, attempt.attempt_id)
   return result?.reservation?.state === 'ACTIVE'
+}
+
+async function preflightCollectionAttempt(itcFinanceClient, link, attempt) {
+  const target = link.collection_target_type === 'REVENUE'
+    ? { type: 'REVENUE', revenue_account_code: link.revenue_account_code }
+    : { type: 'CUSTOMER_CREDIT', customer_id: link.customer_id }
+  const result = await itcFinanceClient.preflightCollectionTarget({
+    payment_link_id: attempt.payment_link_id || link.payment_link_id,
+    collection_attempt_id: attempt.attempt_id,
+    actor_customer_id: link.created_by_customer_id,
+    provider_code: attempt.provider_code,
+    provider_account_id: attempt.provider_account_id,
+    provider_account_version: attempt.provider_account_version,
+    target,
+  }, `ew-preflight-${attempt.attempt_id}`, attempt.attempt_id)
+  if (result?.ready !== true) {
+    throw new PaymentLinkError('ITC_COLLECTION_PREFLIGHT_NOT_READY', 502)
+  }
 }
 
 function toPublicAttempt(attempt) {
@@ -181,6 +201,25 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
             state: uncertain ? 'UNKNOWN' : 'FAILED',
             providerStatus: uncertain ? 'ITC_RESERVATION_UNKNOWN' : 'ITC_RESERVATION_REJECTED',
             errorCode: /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'RECEIVABLE_RESERVATION_UNAVAILABLE',
+          })
+          return { attempt: toPublicAttempt(attempt), replayed: prepared.replayed }
+        }
+      }
+
+      if (requiresCollectionPreflight(prepared.link)) {
+        try {
+          if (typeof itcFinanceClient?.preflightCollectionTarget !== 'function') {
+            throw new PaymentLinkError('ITC_FINANCE_UNAVAILABLE', 503)
+          }
+          await preflightCollectionAttempt(itcFinanceClient, prepared.link, prepared.attempt)
+        } catch (error) {
+          const errorCode = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || ''))
+            ? error.code
+            : 'ITC_COLLECTION_PREFLIGHT_FAILED'
+          const attempt = await repository.updateAttempt(prepared.attempt.attempt_id, {
+            state: 'FAILED',
+            providerStatus: 'ITC_PREFLIGHT_REJECTED',
+            errorCode,
           })
           return { attempt: toPublicAttempt(attempt), replayed: prepared.replayed }
         }

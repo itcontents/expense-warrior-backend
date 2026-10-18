@@ -56,6 +56,127 @@ test('startAttempt persists a stable attempt, sends one signed-provider operatio
   assert.equal(JSON.stringify(result).includes('260763456789'), false)
 })
 
+test('revenue collection preflights the persisted target and provider snapshot before one deposit', async () => {
+  const calls = []
+  const link = {
+    ...baseLink,
+    created_by_customer_id: '50000000-0000-4000-8000-000000000001',
+    collection_target_type: 'REVENUE',
+    revenue_account_code: '4000',
+  }
+  const persistedAttempt = {
+    ...baseAttempt,
+    payment_link_id: link.payment_link_id,
+    created_by_customer_id: link.created_by_customer_id,
+    collection_target_type: link.collection_target_type,
+    revenue_account_code: link.revenue_account_code,
+    provider_account_id: providerAccountIdentity.provider_account_id,
+    provider_account_version: providerAccountIdentity.provider_account_version,
+  }
+  const service = createPublicPaymentService({
+    repository: {
+      getPublicLink: async () => link,
+      createAttempt: async () => { calls.push({ type: 'persist' }); return { link, attempt: persistedAttempt, replayed: false } },
+      updateAttempt: async (_id, update) => ({ ...persistedAttempt, ...update }),
+    },
+    itcFinanceClient: { preflightCollectionTarget: async (...args) => { calls.push({ type: 'preflight', args }); return { ready: true } } },
+    idFactory: () => attemptId,
+    providerRegistry: {
+      getActiveNetworks: async () => [mtnDepositOption],
+      getAccountIdentity: () => providerAccountIdentity,
+      get: () => ({ initiateDeposit: async (input) => { calls.push({ type: 'provider', input }); return acceptedDeposit() }, getDepositStatus: async () => null }),
+    },
+  })
+
+  const result = await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
+
+  assert.equal(result.attempt.status, 'PENDING')
+  assert.deepEqual(calls.map(({ type }) => type), ['persist', 'preflight', 'provider'])
+  assert.deepEqual(calls[1].args[0], {
+    payment_link_id: link.payment_link_id,
+    collection_attempt_id: attemptId,
+    actor_customer_id: link.created_by_customer_id,
+    provider_code: 'pawapay',
+    provider_account_id: providerAccountIdentity.provider_account_id,
+    provider_account_version: providerAccountIdentity.provider_account_version,
+    target: { type: 'REVENUE', revenue_account_code: '4000' },
+  })
+  assert.equal(calls[1].args[1], `ew-preflight-${attemptId}`)
+  assert.equal(calls[1].args[2], attemptId)
+  assert.equal(calls[2].input.transaction_id, attemptId)
+})
+
+test('collection target preflight rejection fails the persisted attempt without calling the provider', async () => {
+  const updates = []
+  const preflightPayloads = []
+  let providerCalls = 0
+  const link = {
+    ...baseLink,
+    created_by_customer_id: '50000000-0000-4000-8000-000000000001',
+    collection_target_type: 'CUSTOMER_CREDIT',
+    customer_id: '50000000-0000-4000-8000-000000000002',
+  }
+  const service = createPublicPaymentService({
+    repository: {
+      getPublicLink: async () => link,
+      createAttempt: async () => ({ link, attempt: { ...baseAttempt, payment_link_id: link.payment_link_id }, replayed: false }),
+      updateAttempt: async (_id, update) => { updates.push(update); return { ...baseAttempt, ...update } },
+    },
+    itcFinanceClient: { preflightCollectionTarget: async (payload) => {
+      preflightPayloads.push(payload)
+      throw Object.assign(new Error('unsafe details'), { code: 'CUSTOMER_CREDIT_NOT_READY', statusCode: 409 })
+    } },
+    idFactory: () => attemptId,
+    providerRegistry: {
+      getActiveNetworks: async () => [mtnDepositOption],
+      getAccountIdentity: () => providerAccountIdentity,
+      get: () => ({ initiateDeposit: async () => { providerCalls++; return acceptedDeposit() }, getDepositStatus: async () => null }),
+    },
+  })
+
+  const result = await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
+
+  assert.equal(result.attempt.status, 'FAILED')
+  assert.equal(providerCalls, 0)
+  assert.deepEqual(preflightPayloads[0].target, { type: 'CUSTOMER_CREDIT', customer_id: link.customer_id })
+  assert.deepEqual(updates[0], {
+    state: 'FAILED', providerStatus: 'ITC_PREFLIGHT_REJECTED', errorCode: 'CUSTOMER_CREDIT_NOT_READY',
+  })
+})
+
+test('unavailable collection preflight is a known local failure, not an unknown provider outcome', async () => {
+  const updates = []
+  let providerCalls = 0
+  const link = {
+    ...baseLink,
+    created_by_customer_id: '50000000-0000-4000-8000-000000000001',
+    collection_target_type: 'REVENUE',
+    revenue_account_code: '4000',
+  }
+  const service = createPublicPaymentService({
+    repository: {
+      getPublicLink: async () => link,
+      createAttempt: async () => ({ link, attempt: { ...baseAttempt, payment_link_id: link.payment_link_id }, replayed: false }),
+      updateAttempt: async (_id, update) => { updates.push(update); return { ...baseAttempt, ...update } },
+    },
+    itcFinanceClient: { preflightCollectionTarget: async () => { throw Object.assign(new Error('offline'), { code: 'ITC_FINANCE_UNAVAILABLE', statusCode: 503 }) } },
+    idFactory: () => attemptId,
+    providerRegistry: {
+      getActiveNetworks: async () => [mtnDepositOption],
+      getAccountIdentity: () => providerAccountIdentity,
+      get: () => ({ initiateDeposit: async () => { providerCalls++; return acceptedDeposit() }, getDepositStatus: async () => null }),
+    },
+  })
+
+  const result = await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
+
+  assert.equal(result.attempt.status, 'FAILED')
+  assert.equal(providerCalls, 0)
+  assert.deepEqual(updates[0], {
+    state: 'FAILED', providerStatus: 'ITC_PREFLIGHT_REJECTED', errorCode: 'ITC_FINANCE_UNAVAILABLE',
+  })
+})
+
 test('startAttempt preserves the selected add-on and account identity through attempt creation', async () => {
   const addonAccount = { provider_account_id: '71000000-0000-4000-8000-000000000001', provider_account_version: 3 }
   const addonNetwork = { ...mtnDepositOption, provider_code: 'airtel_direct', code: 'AIRTEL_OAPI_ZMB', provider_label: 'Airtel Direct' }
@@ -133,16 +254,19 @@ test('startAttempt sends whole-number amounts as integers for a NONE-decimal net
 
 test('startAttempt replays the same idempotency key without a second provider call', async () => {
   let calls = 0
+  let preflightCalls = 0
   const requestFingerprint = crypto.createHash('sha256').update(JSON.stringify(['MTN_MOMO_ZMB', '260763456789'])).digest('hex')
   const service = createPublicPaymentService({
     repository: { getAttemptByIdempotency: async () => ({ ...baseAttempt, request_fingerprint: requestFingerprint, state: 'UNKNOWN' }) },
     idFactory: () => attemptId,
+    itcFinanceClient: { preflightCollectionTarget: async () => { preflightCalls++; return { ready: true } } },
     providerRegistry: { getActiveNetworks: async () => { throw new Error('configuration temporarily unavailable') }, get: () => ({ initiateDeposit: async () => { calls++; return {} }, getDepositStatus: async () => null }) },
   })
   const result = await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
   assert.equal(result.replayed, true)
   assert.equal(result.attempt.status, 'UNKNOWN')
   assert.equal(calls, 0)
+  assert.equal(preflightCalls, 0)
 })
 
 test('startAttempt rejects changed payloads for a previously used idempotency key', async () => {
@@ -223,7 +347,7 @@ test('integer PawaPay amount evidence matches the fixed two-decimal ledger amoun
   assert.equal(result.status, 'SUCCEEDED')
 })
 
-test('verified pending collection retries the same ITC operation without another provider status call', async () => {
+test('post-success ITC failure stays unreceipted and refresh retries the same posting identity', async () => {
   const itcCalls = []
   let providerCalls = 0
   const attempt = {
@@ -241,17 +365,24 @@ test('verified pending collection retries the same ITC operation without another
       getPublicAttempt: async () => attempt,
       markAttemptSucceeded: async (_id, operationId) => ({ ...attempt, state: 'SUCCEEDED', ledger_operation_id: operationId }),
     },
-    itcFinanceClient: { creditCustomerAccount: async (payload, key) => {
+    itcFinanceClient: { creditCustomerAccount: async (payload, key, requestId) => {
       itcCalls.push({ payload, key })
+      if (itcCalls.length === 1) throw Object.assign(new Error('temporary posting failure'), { code: 'ITC_FINANCE_UNAVAILABLE' })
       return { operation: { operation_id: '30000000-0000-4000-8000-000000000001' } }
     } },
     providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => { providerCalls++; return null } }) },
   })
+  const firstResult = await service.refreshAttempt(token, attemptId)
+  assert.equal(firstResult.status, 'VERIFYING_LEDGER')
+  assert.equal(firstResult.receipt_available, false)
+  assert.equal(itcCalls.length, 1)
+
   const result = await service.refreshAttempt(token, attemptId)
   assert.equal(result.status, 'SUCCEEDED')
   assert.equal(result.receipt_available, true)
   assert.equal(providerCalls, 0)
-  assert.equal(itcCalls.length, 1)
+  assert.equal(itcCalls.length, 2)
+  assert.deepEqual(itcCalls[0], itcCalls[1])
   assert.equal(itcCalls[0].payload.customer_id, attempt.customer_id)
 })
 
@@ -328,10 +459,13 @@ test('A/R attempts reserve the full delivered invoice before PawaPay and post wi
       createAttempt: async (input) => ({ link, attempt: { ...baseAttempt, ...input, payment_link_id: link.payment_link_id }, replayed: false }),
       updateAttempt: async (_id, update) => ({ ...baseAttempt, ...update }),
     },
-    itcFinanceClient: { reserveCustomerReceivablePayment: async (payload, key) => {
+    itcFinanceClient: {
+      preflightCollectionTarget: async () => assert.fail('A/R reservations must remain the pre-provider gate'),
+      reserveCustomerReceivablePayment: async (payload, key) => {
       calls.push({ type: 'reserve', payload, key })
       return { reservation: { reservation_id: payload.reservation_id, state: 'ACTIVE' } }
-    } },
+      },
+    },
     idFactory: () => attemptId,
     providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], getAccountIdentity: () => ({
       provider_account_id: '80000000-0000-4000-8000-000000000001', provider_account_version: 2,
