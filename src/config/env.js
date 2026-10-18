@@ -214,6 +214,7 @@ function loadMigrationTargetConfig(source = process.env) {
   const schema = Joi.object({
     DB_MIGRATION_TARGET: Joi.string().trim().min(1).required(),
     DB_MIGRATION_ALLOWED_TARGETS: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_TARGETS_JSON: Joi.string().allow('').default(''),
     DB_MIGRATION_TARGET_HOST: Joi.string().trim().min(1).required(),
     DB_MIGRATION_TARGET_PORT: Joi.number().integer().min(1).max(65535).required(),
     DB_MIGRATION_TARGET_DATABASE: Joi.string().trim().min(1).required(),
@@ -228,10 +229,54 @@ function loadMigrationTargetConfig(source = process.env) {
   }
 
   const allowedTargets = value.DB_MIGRATION_ALLOWED_TARGETS.split(',').map((target) => target.trim()).filter(Boolean)
+  if (new Set(allowedTargets).size !== allowedTargets.length) {
+    const failure = new Error('Migration target allowlist contains duplicate names')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    throw failure
+  }
   if (!allowedTargets.includes(value.DB_MIGRATION_TARGET)) {
     const failure = new Error('Selected migration target is not allowlisted')
     failure.code = 'MIGRATION_TARGET_NOT_ALLOWLISTED'
     throw failure
+  }
+  let targets = null
+  if (value.DB_MIGRATION_TARGETS_JSON) {
+    try {
+      targets = JSON.parse(value.DB_MIGRATION_TARGETS_JSON)
+    } catch {
+      const failure = new Error('Migration target map is invalid')
+      failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+      throw failure
+    }
+    if (!targets || Array.isArray(targets) || typeof targets !== 'object') {
+      const failure = new Error('Migration target map is invalid')
+      failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+      throw failure
+    }
+  } else if (allowedTargets.length > 1) {
+    const failure = new Error('A target identity map is required when multiple targets are allowlisted')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    throw failure
+  }
+  if (targets) {
+    for (const name of allowedTargets) {
+      const configured = targets[name]
+      if (!configured || typeof configured.host !== 'string' || !configured.host.trim() ||
+          !Number.isInteger(Number(configured.port)) || Number(configured.port) < 1 || Number(configured.port) > 65535 ||
+          typeof configured.database !== 'string' || !configured.database.trim() ||
+          typeof configured.user !== 'string' || !configured.user.trim()) {
+        const failure = new Error('Every allowlisted migration target needs a complete identity map')
+        failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+        throw failure
+      }
+    }
+    const mapped = targets[value.DB_MIGRATION_TARGET]
+    if (mapped.host !== value.DB_MIGRATION_TARGET_HOST || Number(mapped.port) !== value.DB_MIGRATION_TARGET_PORT ||
+        mapped.database !== value.DB_MIGRATION_TARGET_DATABASE || mapped.user !== value.DB_MIGRATION_USER) {
+      const failure = new Error('Selected migration target tuple does not match its allowlisted identity')
+      failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+      throw failure
+    }
   }
   if (source.DB_USER && value.DB_MIGRATION_USER === source.DB_USER) {
     const failure = new Error('Migration database identity must differ from the runtime application identity')

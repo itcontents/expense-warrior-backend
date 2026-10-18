@@ -178,6 +178,10 @@ test('migration target config requires a named allowlisted target and complete e
   const values = {
     DB_MIGRATION_TARGET: 'local',
     DB_MIGRATION_ALLOWED_TARGETS: 'local, staging',
+    DB_MIGRATION_TARGETS_JSON: JSON.stringify({
+      local: { host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator' },
+      staging: { host: 'staging-db.example.test', port: 5432, database: 'expense_warrior_staging', user: 'expense_warrior_migrator' },
+    }),
     DB_MIGRATION_TARGET_HOST: '127.0.0.1',
     DB_MIGRATION_TARGET_PORT: '5432',
     DB_MIGRATION_TARGET_DATABASE: 'expense_warrior',
@@ -196,5 +200,9 @@ test('migration target config requires a named allowlisted target and complete e
   assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET_HOST: '' }),
     (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
   assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_USER: 'expense_warrior_app' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGETS_JSON: '' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET_HOST: 'staging-db.example.test' }),
     (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
 })
