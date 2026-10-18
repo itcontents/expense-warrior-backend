@@ -50,6 +50,35 @@ For local configuration, generate a 32-byte random secret with `openssl rand -ba
 
 All amounts are decimal strings with exactly two fractional digits; currency is `ZMW`. Every mutation requires a UUID idempotency key and a stable caller-generated operation ID. Replaying the same key and fingerprint returns the original result; reusing it with different data returns `409 IDEMPOTENCY_CONFLICT`.
 
+### Preflight a revenue or customer-credit collection before provider initiation
+
+`POST /api/v1/internal/expense-warrior/collections/preflight` is a signed, fail-closed readiness check for `REVENUE` and `CUSTOMER_CREDIT` payment links. It accepts the persisted link target and provider identity so ITC can validate the same destination that Expense Warrior will later post. It does not accept `AR_SETTLEMENT`; A/R remains protected by the existing full-balance receivable reservation made before provider initiation, and must not be redirected through this endpoint.
+
+Example request body:
+
+```json
+{
+  "payment_link_id": "<payment-link-uuid>",
+  "collection_attempt_id": "<collection-attempt-uuid>",
+  "actor_customer_id": "<active-itc-admin-uuid>",
+  "provider_code": "pawapay",
+  "provider_account_id": "<itc-provider-account-uuid>",
+  "provider_account_version": 3,
+  "target": {
+    "type": "REVENUE",
+    "revenue_account_code": "4000"
+  }
+}
+```
+
+For customer credit, `target` is exactly `{ "type": "CUSTOMER_CREDIT", "customer_id": "<active-standalone-customer-uuid>" }`. Unknown fields are rejected. The Expense Warrior client uses `X-Request-Id: <collection_attempt_id>` and `Idempotency-Key: ew-preflight-<collection_attempt_id>`; the signed request includes the exact raw body, path, timestamp, nonce, request ID and idempotency key under the standard HMAC-SHA256 service protocol. A ready response is `200 { "success": true, "data": { "ready": true } }`; callers must treat every non-affirmative or unavailable response as not ready.
+
+ITC checks that the provider supports Zambia mobile money in ZMW; exactly one active provider-clearing Treasury mapping matches the payment method, currency, country and clearing asset class; the mapped Treasury and COA are active, postable and supported for that provider; the configured provider account is active for new payments, `READY`, and matches the provider, Treasury and version; and the actor is an active ITC admin. A revenue target must be an active, postable `REVENUE` account. A customer-credit target must be an active standalone customer and account 2020 must be active, postable `LIABILITY_CUSTOMER_CREDIT`.
+
+The readiness queries run in `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` and always end with `ROLLBACK`, whether ready or rejected. They create no hold, reservation, journal, ledger entry or collection operation. Service authentication separately makes the required durable HMAC nonce-replay claim through `claim_expense_warrior_service_nonce`; that security write is outside the read-only readiness transaction and is not a finance/business posting. No schema migration is required for this endpoint, and no migration was applied for it.
+
+This check is a point-in-time preflight, not a reservation or guarantee: provider-account, mapping, actor, or target readiness can change after the snapshot and before the provider call or final ITC posting. Expense Warrior must therefore persist the attempt first, call preflight before any deposit request, and call the existing authoritative ITC posting flow only after provider status and transaction details are verified. A denied or unavailable preflight is a known local failure: mark that attempt `FAILED` with `ITC_PREFLIGHT_REJECTED`, do not call the provider, and allow a new payment attempt with a new collection-attempt ID and idempotency key. A timeout/unknown result from the preflight is safe to treat as not submitted because this endpoint never initiates a provider transaction; it must not be confused with a timeout after provider submission. Do not apply this gate to A/R, whose active reservation is the concurrency control that must remain in place.
+
 ### Reserve (manager approval)
 
 `POST /api/v1/internal/expense-warrior/holds`
