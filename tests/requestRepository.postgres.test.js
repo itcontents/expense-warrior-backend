@@ -118,6 +118,32 @@ test('request repository uses real PostgreSQL transactions, constraints and repl
     })
     assert.deepEqual(unrelatedQueue.items, [], 'unassigned staff must not see another employee queue')
 
+    const attachmentIdForRequest = first.request.attachment.attachment_id
+    const requesterAttachment = await repository.findAttachment({
+      actor,
+      requestId: first.request.request_id,
+      attachmentId: attachmentIdForRequest,
+    })
+    assert.equal(requesterAttachment.storage_key, attachment.storageKey, 'requester can read their own evidence')
+    const assignedManagerAttachment = await repository.findAttachment({
+      actor: { customerId: managerId, role: 'staff' },
+      requestId: first.request.request_id,
+      attachmentId: attachmentIdForRequest,
+    })
+    assert.equal(assignedManagerAttachment.storage_key, attachment.storageKey, 'assigned manager can review evidence')
+    const unrelatedStaffAttachment = await repository.findAttachment({
+      actor: { customerId: randomUUID(), role: 'staff' },
+      requestId: first.request.request_id,
+      attachmentId: attachmentIdForRequest,
+    })
+    assert.equal(unrelatedStaffAttachment, null, 'unrelated staff cannot read another request attachment')
+    const adminAttachment = await repository.findAttachment({
+      actor: { customerId: adminId, role: 'admin' },
+      requestId: first.request.request_id,
+      attachmentId: attachmentIdForRequest,
+    })
+    assert.equal(adminAttachment.storage_key, attachment.storageKey, 'admin can review request evidence')
+
     const rejectedActorId = randomUUID()
     const rejectedKey = randomUUID()
     await assert.rejects(
