@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-const { loadConfig } = require('../src/config/env')
+const { loadConfig, loadMigrationTargetConfig } = require('../src/config/env')
 
 test('loadConfig rejects missing dedicated database credentials', () => {
   assert.throws(
@@ -172,4 +172,29 @@ test('financial PawaPay operations require explicit account-level signed-only co
     ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION: '2',
   })
   assert.equal(config.pawaPay.signedRequestsOnlyConfirmed, true)
+})
+
+test('migration target config requires a named allowlisted target and complete exact identity', () => {
+  const values = {
+    DB_MIGRATION_TARGET: 'local',
+    DB_MIGRATION_ALLOWED_TARGETS: 'local, staging',
+    DB_MIGRATION_TARGET_HOST: '127.0.0.1',
+    DB_MIGRATION_TARGET_PORT: '5432',
+    DB_MIGRATION_TARGET_DATABASE: 'expense_warrior',
+    DB_USER: 'expense_warrior_app',
+    DB_MIGRATION_USER: 'expense_warrior_migrator',
+  }
+  assert.deepEqual(loadMigrationTargetConfig(values), {
+    name: 'local', host: '127.0.0.1', port: 5432,
+    database: 'expense_warrior', user: 'expense_warrior_migrator',
+  })
+
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET: '' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET: 'production' }),
+    (error) => error.code === 'MIGRATION_TARGET_NOT_ALLOWLISTED')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET_HOST: '' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_USER: 'expense_warrior_app' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
 })

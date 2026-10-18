@@ -210,4 +210,43 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
   })
 }
 
-module.exports = { loadConfig }
+function loadMigrationTargetConfig(source = process.env) {
+  const schema = Joi.object({
+    DB_MIGRATION_TARGET: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_ALLOWED_TARGETS: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_TARGET_HOST: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_TARGET_PORT: Joi.number().integer().min(1).max(65535).required(),
+    DB_MIGRATION_TARGET_DATABASE: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_USER: Joi.string().trim().min(1).required(),
+  }).unknown(true)
+  const { value, error } = schema.validate(source, { abortEarly: false, convert: true })
+  if (error) {
+    const failure = new Error('Migration target configuration is incomplete or invalid')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    failure.details = error.details.map((detail) => detail.path.join('.'))
+    throw failure
+  }
+
+  const allowedTargets = value.DB_MIGRATION_ALLOWED_TARGETS.split(',').map((target) => target.trim()).filter(Boolean)
+  if (!allowedTargets.includes(value.DB_MIGRATION_TARGET)) {
+    const failure = new Error('Selected migration target is not allowlisted')
+    failure.code = 'MIGRATION_TARGET_NOT_ALLOWLISTED'
+    throw failure
+  }
+  if (source.DB_USER && value.DB_MIGRATION_USER === source.DB_USER) {
+    const failure = new Error('Migration database identity must differ from the runtime application identity')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    failure.details = ['DB_MIGRATION_USER']
+    throw failure
+  }
+
+  return Object.freeze({
+    name: value.DB_MIGRATION_TARGET,
+    host: value.DB_MIGRATION_TARGET_HOST,
+    port: value.DB_MIGRATION_TARGET_PORT,
+    database: value.DB_MIGRATION_TARGET_DATABASE,
+    user: value.DB_MIGRATION_USER,
+  })
+}
+
+module.exports = { loadConfig, loadMigrationTargetConfig }

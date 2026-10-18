@@ -23,6 +23,41 @@ function getMigrationDatabaseConfig(config) {
   return config.migrationDatabase
 }
 
+async function assertMigrationTargetIdentity(client, target) {
+  if (!client || !target) {
+    const error = new Error('A connected client and named migration target are required')
+    error.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    throw error
+  }
+  const parameters = client.connectionParameters || {}
+  const connectionMatches = String(parameters.host || '') === target.host &&
+    Number(parameters.port) === target.port &&
+    String(parameters.database || '') === target.database &&
+    String(parameters.user || '') === target.user
+  let serverMatches = false
+  try {
+    const result = await client.query(`
+      SELECT current_database() AS database,
+             current_user AS current_role_name,
+             session_user AS session_role_name,
+             pg_is_in_recovery() AS is_in_recovery
+    `)
+    const identity = result.rows?.[0]
+    serverMatches = Boolean(identity) &&
+      identity.database === target.database &&
+      identity.current_role_name === target.user &&
+      identity.session_role_name === target.user &&
+      identity.is_in_recovery === false
+  } catch {
+    serverMatches = false
+  }
+  if (!connectionMatches || !serverMatches) {
+    const error = new Error('Connected database identity does not match the selected migration target')
+    error.code = 'MIGRATION_TARGET_IDENTITY_MISMATCH'
+    throw error
+  }
+}
+
 async function collectMigrations(directory = path.join(__dirname, 'migrations')) {
   const entries = await fs.readdir(directory, { withFileTypes: true })
   const names = entries
@@ -47,14 +82,20 @@ async function collectMigrations(directory = path.join(__dirname, 'migrations'))
   return migrations
 }
 
-async function runMigrations({ pool, env = process.env, directory } = {}) {
+async function runMigrations({ pool, target, env = process.env, directory } = {}) {
   assertMigrationAllowed(env)
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('A PostgreSQL pool is required')
+  if (!target) {
+    const error = new Error('A named, allowlisted migration target is required')
+    error.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    throw error
+  }
 
   const migrations = await collectMigrations(directory)
   const client = await pool.connect()
   let locked = false
   try {
+    await assertMigrationTargetIdentity(client, target)
     await client.query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_ID])
     locked = true
     await client.query(`
@@ -104,20 +145,20 @@ async function runMigrations({ pool, env = process.env, directory } = {}) {
 if (require.main === module) {
   const dotenv = require('dotenv')
   dotenv.config()
-  const { loadConfig } = require('../config/env')
+  const { loadConfig, loadMigrationTargetConfig } = require('../config/env')
   const { createPool } = require('./pool')
 
   let pool
   try {
     assertMigrationAllowed()
     const migrationEnvPath = path.resolve(process.cwd(), '.env.migrations')
-    if (fsSync.existsSync(migrationEnvPath)) {
-      const migrationEnv = dotenv.parse(fsSync.readFileSync(migrationEnvPath))
-      process.env.DB_MIGRATION_USER = migrationEnv.DB_MIGRATION_USER || ''
-      process.env.DB_MIGRATION_PASSWORD = migrationEnv.DB_MIGRATION_PASSWORD || ''
-    }
-    pool = createPool(getMigrationDatabaseConfig(loadConfig(process.env, { includeMigrationCredentials: true })))
-    runMigrations({ pool })
+    const migrationEnv = fsSync.existsSync(migrationEnvPath)
+      ? dotenv.parse(fsSync.readFileSync(migrationEnvPath))
+      : {}
+    const migrationSource = { ...process.env, ...migrationEnv }
+    const target = loadMigrationTargetConfig(migrationSource)
+    pool = createPool(getMigrationDatabaseConfig(loadConfig(migrationSource, { includeMigrationCredentials: true })))
+    runMigrations({ pool, target })
       .then(({ applied }) => console.log(JSON.stringify({ event: 'migrations_applied', count: applied.length })))
       .catch((error) => {
         console.error(JSON.stringify({ event: 'migration_failed', code: error.code || 'MIGRATION_FAILED' }))
@@ -130,4 +171,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertMigrationAllowed, collectMigrations, getMigrationDatabaseConfig, runMigrations }
+module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, collectMigrations, getMigrationDatabaseConfig, runMigrations }
