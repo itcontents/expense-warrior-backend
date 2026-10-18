@@ -35,24 +35,41 @@ async function assertMigrationTargetIdentity(client, target) {
     Number(parameters.port) === target.port &&
     String(parameters.database || '') === target.database &&
     String(parameters.user || '') === target.user
+  const targetSchemaMatches = target.schema === 'public' && target.searchPath === 'public, pg_temp'
   let serverMatches = false
   try {
     const result = await client.query(`
       SELECT current_database() AS database,
              current_user AS current_role_name,
              session_user AS session_role_name,
-             pg_is_in_recovery() AS is_in_recovery
+             current_schema() AS schema_name,
+             current_setting('search_path') AS search_path,
+             pg_is_in_recovery() AS is_in_recovery,
+             target_role.rolsuper AS is_superuser,
+             target_role.rolcreatedb AS can_create_database,
+             target_role.rolcreaterole AS can_create_role,
+             target_role.rolreplication AS can_replicate,
+             target_role.rolbypassrls AS bypasses_row_security
+      FROM pg_catalog.pg_roles target_role
+      WHERE target_role.rolname = current_user
     `)
     const identity = result.rows?.[0]
     serverMatches = Boolean(identity) &&
       identity.database === target.database &&
       identity.current_role_name === target.user &&
       identity.session_role_name === target.user &&
-      identity.is_in_recovery === false
+      identity.schema_name === target.schema &&
+      identity.search_path === target.searchPath &&
+      identity.is_in_recovery === false &&
+      identity.is_superuser === false &&
+      identity.can_create_database === false &&
+      identity.can_create_role === false &&
+      identity.can_replicate === false &&
+      identity.bypasses_row_security === false
   } catch {
     serverMatches = false
   }
-  if (!connectionMatches || !serverMatches) {
+  if (!connectionMatches || !targetSchemaMatches || !serverMatches) {
     const error = new Error('Connected database identity does not match the selected migration target')
     error.code = 'MIGRATION_TARGET_IDENTITY_MISMATCH'
     throw error
@@ -108,15 +125,51 @@ async function inspectMigrationClient(client, target, migrations) {
     transactionStarted = true
     await assertMigrationTargetIdentity(client, target)
     const schema = await client.query(`
-      SELECT to_regclass('expense_warrior_schema_migrations') IS NOT NULL AS ledger_exists,
-             (
-               SELECT count(*)::int
-               FROM pg_catalog.pg_class c
-               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-               WHERE n.nspname = current_schema()
-                 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-                 AND c.relname <> 'expense_warrior_schema_migrations'
-             ) AS application_object_count
+      WITH user_namespaces AS (
+        SELECT oid
+        FROM pg_catalog.pg_namespace
+        WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+          AND nspname NOT LIKE 'pg_toast%'
+          AND nspname NOT LIKE 'pg_temp_%'
+      ), user_objects AS (
+        SELECT schema_row.oid
+          FROM pg_catalog.pg_namespace schema_row
+         WHERE schema_row.oid IN (SELECT oid FROM user_namespaces)
+           AND schema_row.nspname <> 'public'
+        UNION ALL
+        SELECT relation.oid
+          FROM pg_catalog.pg_class relation
+         WHERE relation.relnamespace IN (SELECT oid FROM user_namespaces)
+           AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'i', 'I', 'c')
+           AND NOT (relation.relnamespace = 'public'::regnamespace AND relation.relname = 'expense_warrior_schema_migrations')
+        UNION ALL
+        SELECT proc.oid
+          FROM pg_catalog.pg_proc proc
+         WHERE proc.pronamespace IN (SELECT oid FROM user_namespaces)
+        UNION ALL
+        SELECT data_type.oid
+          FROM pg_catalog.pg_type data_type
+         WHERE data_type.typnamespace IN (SELECT oid FROM user_namespaces)
+           AND data_type.typrelid = 0 AND data_type.typelem = 0
+        UNION ALL
+        SELECT object_row.oid
+          FROM (
+            SELECT coll.oid, coll.collnamespace AS namespace_oid FROM pg_catalog.pg_collation coll
+            UNION ALL SELECT conv.oid, conv.connamespace FROM pg_catalog.pg_conversion conv
+            UNION ALL SELECT op.oid, op.oprnamespace FROM pg_catalog.pg_operator op
+            UNION ALL SELECT opc.oid, opc.opcnamespace FROM pg_catalog.pg_opclass opc
+            UNION ALL SELECT opf.oid, opf.opfnamespace FROM pg_catalog.pg_opfamily opf
+            UNION ALL SELECT stats.oid, stats.stxnamespace FROM pg_catalog.pg_statistic_ext stats
+            UNION ALL SELECT config.oid, config.cfgnamespace FROM pg_catalog.pg_ts_config config
+            UNION ALL SELECT dictionary.oid, dictionary.dictnamespace FROM pg_catalog.pg_ts_dict dictionary
+            UNION ALL SELECT parser.oid, parser.prsnamespace FROM pg_catalog.pg_ts_parser parser
+            UNION ALL SELECT template.oid, template.tmplnamespace FROM pg_catalog.pg_ts_template template
+            UNION ALL SELECT extension.oid, extension.extnamespace FROM pg_catalog.pg_extension extension
+          ) object_row
+         WHERE object_row.namespace_oid IN (SELECT oid FROM user_namespaces)
+      )
+      SELECT to_regclass('public.expense_warrior_schema_migrations') IS NOT NULL AS ledger_exists,
+             (SELECT count(*)::int FROM user_objects) AS application_object_count
     `)
     const schemaState = schema.rows?.[0] || { ledger_exists: false, application_object_count: 0 }
     const migrationByName = new Map(migrations.map((migration) => [migration.name, migration]))
@@ -174,7 +227,7 @@ async function inspectMigrationClient(client, target, migrations) {
     }
 
     return {
-      target: { name: target.name, host: target.host, port: target.port, database: target.database, user: target.user },
+      target: { name: target.name, host: target.host, port: target.port, database: target.database, user: target.user, schema: target.schema, searchPath: target.searchPath },
       state,
       applied,
       pending,

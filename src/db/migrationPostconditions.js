@@ -13,7 +13,25 @@ const MIGRATION_POSTCONDITIONS = Object.freeze({
   '0012_payment_link_collection_targets.sql': { relations: ['payment_links_customer_target_idx', 'payment_links_receivable_target_idx'], columns: { payment_links: ['collection_target_type', 'revenue_account_code', 'customer_id', 'receivable_id'], payment_link_attempts: ['provider_evidence_digest'] } },
   '0013_payment_link_provider_account_snapshot.sql': { columns: { payment_link_attempts: ['provider_account_id', 'provider_account_version'] } },
   '0014_provider_addon_lifecycle.sql': { relations: ['provider_balance_snapshot_batches_account_recent_idx'], columns: { payment_link_attempts: ['network_label', 'provider_account_id', 'provider_account_version'], staff_payout_destinations: ['provider_code'], expense_requests: ['payout_provider_code', 'payout_provider_account_id'], request_payout_attempts: ['provider_account_id', 'provider_account_version', 'provider_network_label'], provider_callback_inbox: ['provider_account_id', 'provider_account_version'], provider_balance_snapshot_batches: ['provider_account_id', 'provider_account_version'] } },
-  '0015_staff_payout_retries.sql': { relations: ['request_payout_attempts_one_active_idx', 'request_payout_attempts_latest_idx'], columns: { request_payout_attempts: ['reservation_operation_id', 'reservation_idempotency_key', 'reservation_hold_id', 'reservation_state'] } },
+  '0015_staff_payout_retries.sql': {
+    relations: ['request_payout_attempts_one_active_idx', 'request_payout_attempts_latest_idx'],
+    columns: { request_payout_attempts: ['reservation_operation_id', 'reservation_idempotency_key', 'reservation_hold_id', 'reservation_state'] },
+    indexes: [{
+      name: 'request_payout_attempts_one_active_idx',
+      table: 'request_payout_attempts',
+      unique: true,
+      keyDefinition: 'USING btree (request_id)',
+      predicateValues: ['RESERVING', 'SUBMITTING', 'PENDING', 'UNKNOWN', 'VERIFICATION_REQUIRED', 'FAILED_PENDING_RELEASE'],
+    }],
+    constraints: [
+      { name: 'request_payout_attempts_reservation_state_check', literals: ['PENDING', 'RESERVED', 'CONSUMED', 'RELEASED', 'FAILED', 'UNKNOWN'], requiredTokens: ['reservation_state'] },
+      { name: 'request_payout_attempts_reservation_key_check', requiredTokens: ['reservation_idempotency_key'], minimum: 8, maximum: 128 },
+      { name: 'request_payout_attempts_reservation_identity_check', literals: ['PENDING', 'UNKNOWN', 'FAILED', 'RESERVED', 'CONSUMED', 'RELEASED'], requiredTokens: ['reservation_state', 'reservation_operation_id', 'reservation_idempotency_key', 'reservation_hold_id'] },
+      { name: 'request_payout_attempts_state_check', literals: ['RESERVING', 'SUBMITTING', 'PENDING', 'UNKNOWN', 'VERIFICATION_REQUIRED', 'FAILED_PENDING_RELEASE', 'FAILED', 'PAID', 'RESERVATION_FAILED'], requiredTokens: ['state'] },
+      { name: 'request_payout_attempts_reserving_check', literals: ['RESERVING', 'PENDING', 'UNKNOWN'], requiredTokens: ['state', 'reservation_state'] },
+      { name: 'request_payout_attempts_reservation_failed_check', literals: ['RESERVATION_FAILED', 'FAILED'], requiredTokens: ['state', 'reservation_state'] },
+    ],
+  },
   '0016_payment_link_attempts_report_created_idx.sql': { relations: ['payment_link_attempts_report_created_idx'] },
 })
 
@@ -23,6 +41,9 @@ async function verifyMigrationPostconditions(client, migrations) {
   const relationNames = new Set()
   const columnPairs = new Map()
   const triggerPairs = new Map()
+  const indexNames = new Set()
+  const criticalIndexes = new Map()
+  const constraintSpecs = new Map()
 
   for (const migration of migrations) {
     const spec = MIGRATION_POSTCONDITIONS[migration.name]
@@ -32,6 +53,12 @@ async function verifyMigrationPostconditions(client, migrations) {
       continue
     }
     for (const name of spec.relations || []) relationNames.add(name)
+    for (const name of spec.relations || []) if (/(?:_idx|_index)$/.test(name)) indexNames.add(name)
+    for (const index of spec.indexes || []) {
+      indexNames.add(index.name)
+      criticalIndexes.set(index.name, index)
+    }
+    for (const constraint of spec.constraints || []) constraintSpecs.set(constraint.name, constraint)
     for (const [table, columns] of Object.entries(spec.columns || {})) {
       for (const column of columns) columnPairs.set(`${table}.${column}`, { table, column })
     }
@@ -62,11 +89,11 @@ async function verifyMigrationPostconditions(client, migrations) {
     for (const row of query.rows || []) foundColumns.add(`${row.table_name}.${row.column_name}`)
   }
 
-  const foundTriggers = new Set()
+  const foundTriggers = new Map()
   if (triggerPairs.size) {
     const pairs = [...triggerPairs.values()]
     const query = await client.query(`
-      SELECT tbl.relname AS table_name, trg.tgname AS trigger_name
+      SELECT tbl.relname AS table_name, trg.tgname AS trigger_name, trg.tgenabled AS enabled_mode
       FROM pg_catalog.pg_trigger trg
       JOIN pg_catalog.pg_class tbl ON tbl.oid = trg.tgrelid
       JOIN pg_catalog.pg_namespace ns ON ns.oid = tbl.relnamespace
@@ -76,7 +103,43 @@ async function verifyMigrationPostconditions(client, migrations) {
           SELECT table_name, trigger_name FROM unnest($1::text[], $2::text[]) AS required(table_name, trigger_name)
         )
     `, [pairs.map(({ table }) => table), pairs.map(({ name }) => name)])
-    for (const row of query.rows || []) foundTriggers.add(`${row.table_name}.${row.trigger_name}`)
+    for (const row of query.rows || []) foundTriggers.set(`${row.table_name}.${row.trigger_name}`, row.enabled_mode)
+  }
+
+  const foundIndexes = new Map()
+  if (indexNames.size) {
+    const query = await client.query(`
+      SELECT idx.relname AS index_name,
+             tbl.relname AS table_name,
+             index_state.indisvalid AS index_valid,
+             index_state.indisready AS index_ready,
+             index_state.indisunique AS is_unique,
+             pg_catalog.pg_get_indexdef(index_state.indexrelid) AS index_definition,
+             pg_catalog.pg_get_expr(index_state.indpred, index_state.indrelid) AS predicate
+      FROM pg_catalog.pg_index index_state
+      JOIN pg_catalog.pg_class idx ON idx.oid = index_state.indexrelid
+      JOIN pg_catalog.pg_class tbl ON tbl.oid = index_state.indrelid
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = idx.relnamespace
+      WHERE ns.nspname = current_schema()
+        AND idx.relname = ANY($1::text[])
+    `, [[...indexNames]])
+    for (const row of query.rows || []) foundIndexes.set(row.index_name, row)
+  }
+
+  const foundConstraints = new Map()
+  if (constraintSpecs.size) {
+    const query = await client.query(`
+      SELECT constraint_row.conname AS constraint_name,
+             constraint_row.contype AS constraint_type,
+             constraint_row.convalidated AS is_validated,
+             pg_catalog.pg_get_constraintdef(constraint_row.oid, true) AS definition
+      FROM pg_catalog.pg_constraint constraint_row
+      JOIN pg_catalog.pg_class tbl ON tbl.oid = constraint_row.conrelid
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = tbl.relnamespace
+      WHERE ns.nspname = current_schema()
+        AND constraint_row.conname = ANY($1::text[])
+    `, [[...constraintSpecs.keys()]])
+    for (const row of query.rows || []) foundConstraints.set(row.constraint_name, row)
   }
 
   for (const migration of migrations) {
@@ -85,7 +148,10 @@ async function verifyMigrationPostconditions(client, migrations) {
     const checks = [
       ...(spec.relations || []).map((name) => foundRelations.has(name)),
       ...Object.entries(spec.columns || {}).flatMap(([table, columns]) => columns.map((column) => foundColumns.has(`${table}.${column}`))),
-      ...(spec.triggers || []).map(([table, name]) => foundTriggers.has(`${table}.${name}`)),
+      ...(spec.triggers || []).map(([table, name]) => ['O', 'A'].includes(foundTriggers.get(`${table}.${name}`))),
+      ...(spec.relations || []).filter((name) => indexNames.has(name)).map((name) => isHealthyIndex(foundIndexes.get(name), criticalIndexes.get(name))),
+      ...(spec.indexes || []).filter((index) => !(spec.relations || []).includes(index.name)).map((index) => isHealthyIndex(foundIndexes.get(index.name), index)),
+      ...(spec.constraints || []).map((constraint) => isHealthyConstraint(foundConstraints.get(constraint.name), constraint)),
     ]
     const passed = checks.length > 0 && checks.every(Boolean)
     const presentCount = checks.filter(Boolean).length
@@ -97,6 +163,61 @@ async function verifyMigrationPostconditions(client, migrations) {
     verified: [...resultByName].map(([migration, result]) => ({ migration, ...result })),
     blockers: [...new Set(blockers)],
   }
+}
+
+function isHealthyIndex(row, spec) {
+  if (!row || row.index_valid !== true || row.index_ready !== true) return false
+  if (!spec) return true
+  if (row.table_name !== spec.table || row.is_unique !== spec.unique) return false
+  if (spec.keyDefinition && !String(row.index_definition || '').includes(spec.keyDefinition)) return false
+  return predicateValues(row.predicate)?.join('\u0000') === [...spec.predicateValues].sort().join('\u0000')
+}
+
+function predicateValues(predicate) {
+  if (typeof predicate !== 'string' || !predicate.trim()) return null
+  let source = predicate.trim().toLowerCase()
+  while (hasSingleOuterParentheses(source)) source = source.slice(1, -1).trim()
+  const anyMatch = source.match(/^state\s*=\s*any\s*\(\s*array\s*\[(.*)\]\s*\)$/)
+  const inMatch = source.match(/^state\s+in\s*\((.*)\)$/)
+  const body = anyMatch?.[1] ?? inMatch?.[1]
+  if (body === undefined) return null
+  const values = [...body.matchAll(/'((?:[^']|'')*)'(?:\s*::\s*[a-z ]+)?/g)].map((match) => match[1].replaceAll("''", "'").toUpperCase())
+  const residue = body.replace(/'((?:[^']|'')*)'(?:\s*::\s*[a-z ]+)?/g, '').replace(/[\s,]/g, '')
+  if (residue || values.length === 0) return null
+  return [...new Set(values)].sort()
+}
+
+function hasSingleOuterParentheses(value) {
+  if (!value.startsWith('(') || !value.endsWith(')')) return false
+  let depth = 0
+  let inString = false
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === "'") {
+      if (inString && value[index + 1] === "'") { index += 1; continue }
+      inString = !inString
+    } else if (!inString && value[index] === '(') depth += 1
+    else if (!inString && value[index] === ')') {
+      depth -= 1
+      if (depth === 0 && index !== value.length - 1) return false
+    }
+  }
+  return depth === 0
+}
+
+function isHealthyConstraint(row, spec) {
+  if (!row || row.constraint_type !== 'c' || row.is_validated !== true || typeof row.definition !== 'string') return false
+  const definition = row.definition.toLowerCase()
+  if (!(spec.requiredTokens || []).every((token) => definition.includes(token.toLowerCase()))) return false
+  const normalizedDefinition = definition.replace(/[()]/g, ' ').replace(/\s+/g, ' ')
+  if (spec.minimum !== undefined &&
+      !new RegExp(`(?:>=\\s*${spec.minimum}(?:\\D|$)|between\\s+${spec.minimum}\\s+and\\s+${spec.maximum}(?:\\D|$))`).test(normalizedDefinition)) return false
+  if (spec.maximum !== undefined &&
+      !new RegExp(`(?:<=\\s*${spec.maximum}(?:\\D|$)|between\\s+${spec.minimum}\\s+and\\s+${spec.maximum}(?:\\D|$))`).test(normalizedDefinition)) return false
+  if (spec.literals) {
+    const literals = [...definition.matchAll(/'((?:[^']|'')*)'/g)].map((match) => match[1].replaceAll("''", "'").toUpperCase())
+    if ([...new Set(literals)].sort().join('\u0000') !== [...spec.literals].sort().join('\u0000')) return false
+  }
+  return true
 }
 
 module.exports = { MIGRATION_POSTCONDITIONS, verifyMigrationPostconditions }

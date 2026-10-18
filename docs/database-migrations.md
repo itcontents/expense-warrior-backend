@@ -12,11 +12,11 @@ Keep runtime credentials in `.env`. Keep the separate migration login and exact 
 cp .env.migrations.example .env.migrations
 ```
 
-Set `DB_MIGRATION_TARGET`, `DB_MIGRATION_ALLOWED_TARGETS`, `DB_MIGRATION_TARGET_HOST`, `DB_MIGRATION_TARGET_PORT`, `DB_MIGRATION_TARGET_DATABASE`, `DB_MIGRATION_USER`, and `DB_MIGRATION_PASSWORD`. The selected target must be allowlisted and match the actual connection parameters and PostgreSQL's reported database, current role, session role, and primary status. The migration role must differ from the runtime `DB_USER`.
+Set `DB_MIGRATION_TARGET`, `DB_MIGRATION_ALLOWED_TARGETS`, `DB_MIGRATION_TARGET_HOST`, `DB_MIGRATION_TARGET_PORT`, `DB_MIGRATION_TARGET_DATABASE`, `DB_MIGRATION_USER`, and `DB_MIGRATION_PASSWORD`. Every target must use an `expense_warrior` database name and the exact `expense_warrior_migrator` role; known ITC database names and other roles are rejected. The selected target must be allowlisted and match the actual connection parameters and PostgreSQL's reported database, current role, session role, `public` schema, exact `public, pg_temp` search path, and primary status. The migration role must differ from the runtime `DB_USER`.
 
 When more than one name is allowlisted, also set `DB_MIGRATION_TARGETS_JSON` to a JSON object mapping every allowed name to its exact `host`, `port`, `database`, and `user`. The selected tuple must match that map. The connection itself uses `DB_HOST`, `DB_PORT`, and `DB_NAME` from `.env`; set these for the same selected Expense Warrior target. Do not use this runner for `itc`, `local_staging`, or ITC staging. Do not put `shopit_dba` or any `*_ADMIN_DB_*` identity into this file.
 
-The migration identity needs catalog and ledger reads for preflight. The apply identity also needs only the DDL privileges required by Expense Warrior migrations on the Expense Warrior database. Keep it out of the API process and do not commit `.env.migrations`.
+The migration connection pins its session search path to `public, pg_temp`: unqualified migration objects go into `public`, and temporary objects cannot shadow them. Preflight inventories application objects across user schemas, including empty custom schemas, tables, partitions, views, materialized views, foreign tables, sequences, indexes, functions, and user-defined types. It blocks a database with existing objects but no migration ledger. The migration role must not be a superuser or have `CREATEDB`, `CREATEROLE`, replication, or `BYPASSRLS` privileges. It needs catalog and ledger reads for preflight and only the DDL privileges required by Expense Warrior migrations on this database. Keep it out of the API process and do not commit `.env.migrations`.
 
 ## Review and apply
 
@@ -49,7 +49,7 @@ Before applying to a shared or production environment:
 
 7. Roll out a compatible API build, check readiness and logs, then deploy the frontend.
 
-The runner asserts target identity before obtaining a non-blocking advisory lock. It rechecks schema and checksums while holding that lock, refuses replicas and unknown/duplicate ledger entries, and blocks schema objects that are ahead of or incomplete relative to the ledger. Each migration and its checksum row commit in one transaction. On a confirmed empty database, creation of the ledger and the first migration share the same transaction. Lock and statement timeouts are bounded. A failed transaction rolls back without adding a ledger row.
+The runner asserts target identity before obtaining a non-blocking advisory lock. It rechecks schema and checksums while holding that lock, refuses replicas and unknown/duplicate ledger entries, and blocks schema objects that are ahead of or incomplete relative to the ledger. Postconditions check that expected indexes are valid and ready, required append-only triggers are enabled, and the payout retry index remains unique with its exact active-state predicate. The payout retry check constraints must remain present, validated, and consistent with the migration's allowed states. Each migration and its checksum row commit in one transaction. On a confirmed empty database, creation of the ledger and the first migration share the same transaction. Lock and statement timeouts are bounded. A failed transaction rolls back without adding a ledger row.
 
 ## Stop and recovery rules
 

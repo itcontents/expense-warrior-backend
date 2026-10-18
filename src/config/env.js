@@ -171,6 +171,7 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
       user: value.DB_MIGRATION_USER,
       password: value.DB_MIGRATION_PASSWORD,
       ssl: value.DB_SSL_MODE === 'disable' ? false : { rejectUnauthorized: true },
+      options: '-c search_path=public,pg_temp',
     }) : null,
     itc: Object.freeze({
       baseUrl: value.ITC_API_BASE_URL.replace(/\/+$/, ''),
@@ -239,6 +240,14 @@ function loadMigrationTargetConfig(source = process.env) {
     failure.code = 'MIGRATION_TARGET_NOT_ALLOWLISTED'
     throw failure
   }
+  const isExpenseWarriorDatabase = (database) => /^expense_warrior(?:_[a-z0-9]+)*$/i.test(String(database || ''))
+  const isExpenseWarriorMigrationRole = (user) => String(user || '') === 'expense_warrior_migrator'
+  if (!isExpenseWarriorDatabase(value.DB_MIGRATION_TARGET_DATABASE) || !isExpenseWarriorMigrationRole(value.DB_MIGRATION_USER)) {
+    const failure = new Error('Migration targets must use the Expense Warrior database and dedicated migration role')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    failure.details = ['DB_MIGRATION_TARGET_DATABASE', 'DB_MIGRATION_USER']
+    throw failure
+  }
   let targets = null
   if (value.DB_MIGRATION_TARGETS_JSON) {
     try {
@@ -269,6 +278,11 @@ function loadMigrationTargetConfig(source = process.env) {
         failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
         throw failure
       }
+      if (!isExpenseWarriorDatabase(configured.database) || !isExpenseWarriorMigrationRole(configured.user)) {
+        const failure = new Error('Every allowlisted target must use an Expense Warrior database and migration role')
+        failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+        throw failure
+      }
     }
     const mapped = targets[value.DB_MIGRATION_TARGET]
     if (mapped.host !== value.DB_MIGRATION_TARGET_HOST || Number(mapped.port) !== value.DB_MIGRATION_TARGET_PORT ||
@@ -291,6 +305,8 @@ function loadMigrationTargetConfig(source = process.env) {
     port: value.DB_MIGRATION_TARGET_PORT,
     database: value.DB_MIGRATION_TARGET_DATABASE,
     user: value.DB_MIGRATION_USER,
+    schema: 'public',
+    searchPath: 'public, pg_temp',
   })
 }
 

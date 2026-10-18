@@ -24,6 +24,10 @@
 ## Review Focus
 
 - Wrong environment with a valid-looking database name: assert host, port, database, session/current user, and primary status against the selected named target before any write.
+- Cross-system target drift: accept only `expense_warrior*` databases and the exact `expense_warrior_migrator` role, including every allowlisted tuple; reject ITC database names and privileged identities.
+- Schema drift: require `public` as the expected schema and exactly `public, pg_temp` as the connected `search_path`, keeping temporary objects after the application schema.
+- Incomplete empty-database detection: inventory user schemas and PostgreSQL catalog objects, including sequences, indexes, functions, and user-defined types, before allowing ledger bootstrap.
+- Weak postconditions: verify expected index validity/readiness, trigger enabled state, validated payout retry constraints, and the exact unique active-attempt predicate.
 - Existing schema without ledger: classify as manual review and refuse to initialize an empty ledger or replay DDL.
 - First migration failure on a new empty target: assert ledger bootstrap and first migration roll back atomically.
 - Duplicate runner: assert advisory-lock contention prevents a second writer.
@@ -113,3 +117,11 @@
 - [ ] **Step 3: Run `npm run build`** from the frontend repository root after UI work is complete and browser-check UI flows per the companion frontend plan.
 - [ ] **Step 4: Confirm no direct ITC DB configuration was added to Expense Warrior and no migration, adoption, financial write, or provider call was run.**
 - [ ] **Step 5: Commit the implementation** in the Expense Warrior backend repository and link the operator runbook from the ITC integration guide when the corresponding repository branch is reviewed.
+
+### Audit hardening follow-up — 2026-10-18
+
+- [x] Reject database names outside the Expense Warrior namespace, known ITC database names, and any migration role except `expense_warrior_migrator`; validate each allowlisted tuple.
+- [x] Pin the migration-only PostgreSQL session to `public, pg_temp` and compare the reported current schema and search path before reads or writes.
+- [x] Expand non-empty target discovery across user schemas, relation kinds (including sequences and indexes), routines, user types, and other schema objects.
+- [x] Verify expected indexes are valid and ready, required triggers are enabled, and retry constraints are present and validated; verify the retry partial unique index's table, uniqueness, and state predicate.
+- [x] Run the full backend suite, complete source/diff review, record evidence, and commit the hardening.

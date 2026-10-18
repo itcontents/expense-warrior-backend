@@ -35,7 +35,7 @@ test('loadConfig keeps migration credentials out of the runtime and rejects part
   const config = loadConfig(migrationValues, { includeMigrationCredentials: true })
   assert.deepEqual(config.migrationDatabase, {
     host: '127.0.0.1', port: 5432, database: 'expense_warrior',
-    user: 'expense_warrior_migrator', password: 'migration-password', ssl: false,
+    user: 'expense_warrior_migrator', password: 'migration-password', ssl: false, options: '-c search_path=public,pg_temp',
   })
 
   assert.throws(() => loadConfig({ ...values, DB_MIGRATION_USER: 'expense_warrior_migrator' }, { includeMigrationCredentials: true }),
@@ -190,7 +190,7 @@ test('migration target config requires a named allowlisted target and complete e
   }
   assert.deepEqual(loadMigrationTargetConfig(values), {
     name: 'local', host: '127.0.0.1', port: 5432,
-    database: 'expense_warrior', user: 'expense_warrior_migrator',
+    database: 'expense_warrior', user: 'expense_warrior_migrator', schema: 'public', searchPath: 'public, pg_temp',
   })
 
   assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET: '' }),
@@ -205,4 +205,21 @@ test('migration target config requires a named allowlisted target and complete e
     (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
   assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET_HOST: 'staging-db.example.test' }),
     (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET_DATABASE: 'itc' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET_DATABASE: 'local_staging' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET_DATABASE: 'staging' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_USER: 'shopit_dba' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_USER: 'EXPENSE_WARRIOR_MIGRATOR' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({
+    ...values,
+    DB_MIGRATION_TARGETS_JSON: JSON.stringify({
+      local: { host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator' },
+      staging: { host: 'staging-db.example.test', port: 5432, database: 'itc', user: 'expense_warrior_migrator' },
+    }),
+  }), (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
 })

@@ -6,7 +6,7 @@ const path = require('node:path')
 
 const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, inspectMigrations, planMigrations, runMigrations, verifyMigrations } = require('../src/db/migrate')
 
-const migrationTarget = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator' }
+const migrationTarget = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator', schema: 'public', searchPath: 'public, pg_temp' }
 
 async function createMigrationFixture(files = { '0001_first.sql': 'SELECT 1;', '0002_second.sql': 'SELECT 2;' }) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'expense-migration-inspect-'))
@@ -20,7 +20,7 @@ function createInspectPool({ ledgerExists = true, applicationTables = 1, rows = 
     connectionParameters: { host: migrationTarget.host, port: migrationTarget.port, database: migrationTarget.database, user: migrationTarget.user },
     async query(sql) {
       statements.push(sql.trim())
-      if (/current_database\(\)/i.test(sql)) return { rows: [{ database: migrationTarget.database, current_role_name: migrationTarget.user, session_role_name: migrationTarget.user, is_in_recovery: false }] }
+      if (/current_database\(\)/i.test(sql)) return { rows: [{ database: migrationTarget.database, current_role_name: migrationTarget.user, session_role_name: migrationTarget.user, schema_name: 'public', search_path: 'public, pg_temp', is_in_recovery: false, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] }
       if (/to_regclass/i.test(sql)) return { rows: [{ ledger_exists: ledgerExists, application_object_count: applicationTables }] }
       if (/SELECT migration_name, checksum/i.test(sql)) return { rows }
       return { rows: [] }
@@ -47,7 +47,7 @@ function createApplyPool({ ledgerExists = false, applicationTables = 0, rows = [
         transactionSnapshot = null
       }
       if (statement === 'COMMIT') transactionSnapshot = null
-      if (/current_database\(\)/i.test(statement)) return { rows: [{ database: migrationTarget.database, current_role_name: migrationTarget.user, session_role_name: migrationTarget.user, is_in_recovery: isInRecovery }] }
+      if (/current_database\(\)/i.test(statement)) return { rows: [{ database: migrationTarget.database, current_role_name: migrationTarget.user, session_role_name: migrationTarget.user, schema_name: migrationTarget.schema, search_path: migrationTarget.searchPath, is_in_recovery: isInRecovery, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] }
       if (/pg_try_advisory_lock/i.test(statement)) return { rows: [{ acquired: lockAcquired }] }
       if (/to_regclass/i.test(statement)) return { rows: [{ ledger_exists: ledgerExists, application_object_count: applicationTables }] }
       if (/SELECT migration_name, checksum/i.test(statement)) return { rows: appliedRows }
@@ -99,15 +99,21 @@ test('getMigrationDatabaseConfig fails closed without a separate migration ident
 })
 
 test('assertMigrationTargetIdentity verifies connection and server identity and rejects replicas', async () => {
-  const target = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator' }
+  const target = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator', schema: 'public', searchPath: 'public, pg_temp' }
   const client = {
     connectionParameters: { host: target.host, port: target.port, database: target.database, user: target.user },
     async query(sql) {
       assert.match(sql, /current_database\(\)/)
       assert.match(sql, /current_user/)
       assert.match(sql, /session_user/)
+      assert.match(sql, /current_schema\(\)/)
+      assert.match(sql, /rolbypassrls/)
+      assert.match(sql, /current_setting\('search_path'/)
       assert.match(sql, /pg_is_in_recovery\(\)/)
-      return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, is_in_recovery: false }] }
+      assert.match(sql, /rolsuper/)
+      assert.match(sql, /rolcreatedb/)
+      assert.match(sql, /rolcreaterole/)
+      return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: target.schema, search_path: target.searchPath, is_in_recovery: false, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] }
     },
   }
   await assert.doesNotReject(assertMigrationTargetIdentity(client, target))
@@ -116,8 +122,16 @@ test('assertMigrationTargetIdentity verifies connection and server identity and 
     ...client, connectionParameters: { ...client.connectionParameters, database: 'itc' },
   }, target), (error) => error.code === 'MIGRATION_TARGET_IDENTITY_MISMATCH')
   await assert.rejects(assertMigrationTargetIdentity({
-    ...client, async query() { return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, is_in_recovery: true }] } },
+    ...client, async query() { return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: target.schema, search_path: target.searchPath, is_in_recovery: true, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] } },
   }, target), (error) => error.code === 'MIGRATION_TARGET_IDENTITY_MISMATCH')
+  await assert.rejects(assertMigrationTargetIdentity({
+    ...client, async query() { return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: 'attacker_schema', search_path: 'attacker_schema, public', is_in_recovery: false, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] } },
+  }, target), (error) => error.code === 'MIGRATION_TARGET_IDENTITY_MISMATCH')
+  await assert.rejects(assertMigrationTargetIdentity({
+    ...client, async query() { return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: target.schema, search_path: target.searchPath, is_in_recovery: false, is_superuser: true, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] } },
+  }, target), (error) => error.code === 'MIGRATION_TARGET_IDENTITY_MISMATCH')
+  await assert.rejects(assertMigrationTargetIdentity(client, { ...target, searchPath: 'public, attacker_schema' }),
+    (error) => error.code === 'MIGRATION_TARGET_IDENTITY_MISMATCH')
 })
 
 test('inspectMigrations is read-only, target-checked, and reports applied plus pending checksums', async () => {
@@ -131,7 +145,19 @@ test('inspectMigrations is read-only, target-checked, and reports applied plus p
     assert.ok(fixture.statements.includes('BEGIN READ ONLY'))
     assert.ok(fixture.statements.includes('ROLLBACK'))
     assert.ok(fixture.statements.some((sql) => /current_database\(\)/i.test(sql)))
-    assert.ok(fixture.statements.every((sql) => /^(BEGIN READ ONLY|ROLLBACK|RELEASE|SELECT)\b/i.test(sql)))
+    assert.ok(fixture.statements.every((sql) => /^(BEGIN READ ONLY|ROLLBACK|RELEASE|SELECT|WITH)\b/i.test(sql)))
+    const objectInventory = fixture.statements.find((sql) => /application_object_count/.test(sql))
+    assert.match(objectInventory, /pg_catalog\.pg_namespace/)
+    assert.match(objectInventory, /pg_catalog\.pg_class/)
+    assert.match(objectInventory, /pg_catalog\.pg_proc/)
+    assert.match(objectInventory, /pg_catalog\.pg_type/)
+    assert.match(objectInventory, /pg_catalog\.pg_collation/)
+    assert.match(objectInventory, /pg_catalog\.pg_statistic_ext/)
+    assert.match(objectInventory, /pg_catalog\.pg_ts_config/)
+    assert.match(objectInventory, /pg_catalog\.pg_extension/)
+    assert.match(objectInventory, /'S', 'i', 'I'/)
+    assert.match(objectInventory, /pg_temp_%/)
+    assert.match(objectInventory, /'public'::regnamespace/)
   } finally {
     await fs.rm(directory, { recursive: true, force: true })
   }
@@ -184,7 +210,7 @@ test('planMigrations lists ordered checksums without writing', async () => {
     assert.equal(result.state, 'NEW_EMPTY_DATABASE')
     assert.deepEqual(result.steps.map(({ name }) => name), ['0001_first.sql', '0002_second.sql'])
     assert.ok(result.steps.every(({ checksum }) => /^[a-f0-9]{64}$/.test(checksum)))
-    assert.ok(fixture.statements.every((sql) => /^(BEGIN READ ONLY|ROLLBACK|RELEASE|SELECT)\b/i.test(sql)))
+    assert.ok(fixture.statements.every((sql) => /^(BEGIN READ ONLY|ROLLBACK|RELEASE|SELECT|WITH)\b/i.test(sql)))
   } finally {
     await fs.rm(directory, { recursive: true, force: true })
   }
