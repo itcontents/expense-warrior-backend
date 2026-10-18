@@ -24,7 +24,7 @@ A fresh read-only check on 2026-10-18 reconfirmed that `local_staging.public.com
 
 ## Fresh Expense Warrior validation (2026-10-18)
 
-`npm test` passed 361 tests; four database tests were skipped by default. The separately approved `npm run test:postgres` passed all four PostgreSQL repository tests against the dedicated `expense_warrior` database as the restricted `expense_warrior_app` role. These checks use session-local temporary tables and cover request/replay, staged approval and payout preparation, manager reassignment, and payment-link collection persistence. They do not prove multi-connection race safety, exercise persistent application rows, apply migrations, contact ITC, or call PawaPay. Live financial flows remain gated; no migration or payment operation was run.
+Fresh validation on 2026-10-18: API `npm test` passed 386 tests with four database-gated skips; `npm run test:postgres` passed all four repository tests against the dedicated `expense_warrior` database as restricted `expense_warrior_app`; frontend `npm test` passed 60/60 and `npm run build` passed; ITC `node --test tests/expenseWarrior*.test.js` passed 67/67 on `codex/expense-warrior-v1-unified`. The PostgreSQL tests use session-local temporary tables and cover request/replay, staged approval and payout preparation, manager reassignment, and payment-link collection persistence. These checks do not prove multi-connection race safety, exercise persistent application rows, apply migrations, contact ITC, or call PawaPay. Live financial flows remain gated; no migration or payment operation was run.
 
 ## Implementation status (2026-10-16)
 
