@@ -167,3 +167,13 @@ The services do not share a database transaction. Use an outbox/reconciliation s
 ## Readiness gate
 
 Before applying migrations or enabling finance operations, review the exact target and migration checksum, verify account/provider mappings and signed-key provenance, confirm nonce and collection tables are ready, and run the disposable-PostgreSQL transaction/concurrency suite. Keep collection and payout feature flags off until the guarded migrations are explicitly authorized and applied, an authorized end-to-end verification passes, and reconciliation/monitoring is ready. Do not create a payment during source validation. Delivered-invoice A/R remains disabled until migrations 136/137 are applied and verified in the target, account 1100 identity/readiness is confirmed, and authorized transaction/concurrency and provider reconciliation checks pass. Credit-note/return handling remains incomplete before credit invoices are used for live sales.
+
+## Preflight implementation evidence (2026-10-18)
+
+- Expense Warrior API: branch `codex/itc-migration-ledger-clarification`, base `f08664e`; pre-provider-gate code commit `2d812e0`, pre-evidence contract commit `692536b7faace16cd3f5ca63affc92a7b8a661c3`.
+- ITC backend: branch `codex/expense-warrior-itc-integration`, base `26af19f`; route commit `2aee8f6`, pre-evidence contract commit `165f8e327ad3384bc12054bdb7a146d62382c285`.
+- Frontend retry state: branch `main`, final `7ce28e173d881cbee055df5dfedc25f18e8464fa`.
+- Validation: ITC finance service/route/protocol tests 38/38; Expense Warrior client/payment-service tests 39/39; full Expense Warrior API suite 383 passed and 4 PostgreSQL-gated skips; frontend 59/59 and production build passed. Independent cross-repo reviews found no concrete issues.
+- A mobile viewport browser check at port 5175 used mocked public API responses. It confirmed the failed-payment message, reachable retry CTA, form restoration and fresh idempotency keys on two submissions. No PawaPay request was made.
+- Target DB grants and migration state remain unverified: the approved read-only helper failed closed because `ACCOUNTING_AUDIT_DB_HOST` was missing. The ITC smoke suite could not establish a DB session; a dummy unreachable host is not DB-backed validation.
+- No migration was applied or adopted, no database write was made, and no payment/provider call was initiated. Before production collection, verify ITC target grants/configuration and the PawaPay account-level signed-requests-only setting, keep finance flags disabled until all release gates pass, and complete authorized reconciliation validation.
