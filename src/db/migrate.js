@@ -82,6 +82,95 @@ async function collectMigrations(directory = path.join(__dirname, 'migrations'))
   return migrations
 }
 
+function migrationError(code, message) {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
+async function inspectMigrations({ pool, target, directory } = {}) {
+  if (!pool || typeof pool.connect !== 'function') throw new TypeError('A PostgreSQL pool is required')
+  if (!target) throw migrationError('MIGRATION_TARGET_CONFIG_INVALID', 'A named, allowlisted migration target is required')
+  const migrations = await collectMigrations(directory)
+  const client = await pool.connect()
+  let transactionStarted = false
+  try {
+    await client.query('BEGIN READ ONLY')
+    transactionStarted = true
+    await assertMigrationTargetIdentity(client, target)
+    const schema = await client.query(`
+      SELECT to_regclass('expense_warrior_schema_migrations') IS NOT NULL AS ledger_exists,
+             (
+               SELECT count(*)::int
+               FROM pg_catalog.pg_class c
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = current_schema()
+                 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                 AND c.relname <> 'expense_warrior_schema_migrations'
+             ) AS application_object_count
+    `)
+    const schemaState = schema.rows?.[0] || { ledger_exists: false, application_object_count: 0 }
+    const migrationByName = new Map(migrations.map((migration) => [migration.name, migration]))
+    const ledgerRows = schemaState.ledger_exists
+      ? (await client.query('SELECT migration_name, checksum FROM expense_warrior_schema_migrations ORDER BY migration_name')).rows || []
+      : []
+    const blockers = []
+    const rowsByName = new Map()
+    for (const row of ledgerRows) {
+      const name = String(row.migration_name || '')
+      rowsByName.set(name, (rowsByName.get(name) || 0) + 1)
+      if (!migrationByName.has(name)) blockers.push('UNKNOWN_LEDGER_MIGRATION')
+    }
+    if ([...rowsByName.values()].some((count) => count > 1)) blockers.push('DUPLICATE_LEDGER_ROW')
+
+    const applied = []
+    for (const row of ledgerRows) {
+      const source = migrationByName.get(String(row.migration_name || ''))
+      if (!source) continue
+      const checksum = String(row.checksum || '').trim()
+      if (checksum !== source.checksum) blockers.push('MIGRATION_CHECKSUM_MISMATCH')
+      applied.push({ name: source.name, checksum, matchesSource: checksum === source.checksum })
+    }
+    const appliedNames = new Set(applied.map(({ name }) => name))
+    const pending = migrations
+      .filter(({ name }) => !appliedNames.has(name))
+      .map(({ name, checksum }) => ({ name, checksum }))
+
+    let state
+    if (!schemaState.ledger_exists && Number(schemaState.application_object_count) > 0) {
+      state = 'MANUAL_REVIEW_REQUIRED'
+      blockers.push('MIGRATION_LEDGER_MISSING_FOR_NON_EMPTY_SCHEMA')
+    } else if (blockers.length) {
+      state = 'BLOCKED'
+    } else if (!schemaState.ledger_exists) {
+      state = 'NEW_EMPTY_DATABASE'
+    } else {
+      state = 'READY'
+    }
+
+    return {
+      target: { name: target.name, host: target.host, port: target.port, database: target.database, user: target.user },
+      state,
+      applied,
+      pending,
+      blockers: [...new Set(blockers)],
+    }
+  } finally {
+    if (transactionStarted) await client.query('ROLLBACK').catch(() => {})
+    client.release()
+  }
+}
+
+async function planMigrations(options = {}) {
+  const status = await inspectMigrations(options)
+  return {
+    target: status.target,
+    state: status.state,
+    steps: status.pending.map(({ name, checksum }) => ({ name, checksum })),
+    blockers: status.blockers,
+  }
+}
+
 async function runMigrations({ pool, target, env = process.env, directory } = {}) {
   assertMigrationAllowed(env)
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('A PostgreSQL pool is required')
@@ -150,7 +239,9 @@ if (require.main === module) {
 
   let pool
   try {
-    assertMigrationAllowed()
+    const command = process.argv[2] || 'apply'
+    if (!['apply', 'status', 'plan'].includes(command)) throw migrationError('MIGRATION_COMMAND_INVALID', 'Unknown migration command')
+    if (command === 'apply') assertMigrationAllowed()
     const migrationEnvPath = path.resolve(process.cwd(), '.env.migrations')
     const migrationEnv = fsSync.existsSync(migrationEnvPath)
       ? dotenv.parse(fsSync.readFileSync(migrationEnvPath))
@@ -158,8 +249,20 @@ if (require.main === module) {
     const migrationSource = { ...process.env, ...migrationEnv }
     const target = loadMigrationTargetConfig(migrationSource)
     pool = createPool(getMigrationDatabaseConfig(loadConfig(migrationSource, { includeMigrationCredentials: true })))
-    runMigrations({ pool, target })
-      .then(({ applied }) => console.log(JSON.stringify({ event: 'migrations_applied', count: applied.length })))
+    const operation = command === 'status'
+      ? inspectMigrations({ pool, target })
+      : command === 'plan'
+        ? planMigrations({ pool, target })
+        : runMigrations({ pool, target })
+    operation
+      .then((result) => {
+        if (command === 'apply') {
+          console.log(JSON.stringify({ event: 'migrations_applied', count: result.applied.length }))
+          return
+        }
+        console.log(JSON.stringify({ event: `migrations_${command}`, ...result }))
+        if (result.state === 'BLOCKED' || result.state === 'MANUAL_REVIEW_REQUIRED') process.exitCode = 1
+      })
       .catch((error) => {
         console.error(JSON.stringify({ event: 'migration_failed', code: error.code || 'MIGRATION_FAILED' }))
         process.exitCode = 1
@@ -171,4 +274,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, collectMigrations, getMigrationDatabaseConfig, runMigrations }
+module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations }
