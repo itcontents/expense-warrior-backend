@@ -73,7 +73,15 @@ test('preflightCollectionTarget signs the exact request and accepts only an affi
     requestIdFactory: () => requestId,
     now: () => 1792080000000,
   })
-  const payload = { target_type: 'REVENUE', revenue_account_code: '4000', currency: 'ZMW' }
+  const payload = {
+    payment_link_id: '70000000-0000-4000-8000-000000000002',
+    collection_attempt_id: '70000000-0000-4000-8000-000000000003',
+    actor_customer_id: '60000000-0000-4000-8000-000000000001',
+    provider_code: 'pawapay',
+    provider_account_id: '80000000-0000-4000-8000-000000000001',
+    provider_account_version: 1,
+    target: { type: 'REVENUE', revenue_account_code: '4000' },
+  }
   const idempotencyKey = 'collection-preflight-0001'
 
   assert.deepEqual(await client.preflightCollectionTarget(payload, idempotencyKey, requestId), { ready: true })
