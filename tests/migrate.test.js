@@ -4,7 +4,7 @@ const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 
-const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, inspectMigrations, planMigrations } = require('../src/db/migrate')
+const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, inspectMigrations, planMigrations, runMigrations, verifyMigrations } = require('../src/db/migrate')
 
 const migrationTarget = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator' }
 
@@ -28,6 +28,43 @@ function createInspectPool({ ledgerExists = true, applicationTables = 1, rows = 
     release() { statements.push('RELEASE') },
   }
   return { statements, pool: { async connect() { return client } } }
+}
+
+function createApplyPool({ ledgerExists = false, applicationTables = 0, rows = [], lockAcquired = true, isInRecovery = false, failOnMigration = '' } = {}) {
+  const statements = []
+  const appliedRows = [...rows]
+  const connectionParameters = { host: migrationTarget.host, port: migrationTarget.port, database: migrationTarget.database, user: migrationTarget.user }
+  let transactionSnapshot = null
+  const client = {
+    connectionParameters,
+    async query(sql, params = []) {
+      const statement = sql.trim()
+      statements.push(statement)
+      if (statement === 'BEGIN' || statement === 'BEGIN READ ONLY') transactionSnapshot = { ledgerExists, rowsLength: appliedRows.length }
+      if (statement === 'ROLLBACK' && transactionSnapshot) {
+        ledgerExists = transactionSnapshot.ledgerExists
+        appliedRows.length = transactionSnapshot.rowsLength
+        transactionSnapshot = null
+      }
+      if (statement === 'COMMIT') transactionSnapshot = null
+      if (/current_database\(\)/i.test(statement)) return { rows: [{ database: migrationTarget.database, current_role_name: migrationTarget.user, session_role_name: migrationTarget.user, is_in_recovery: isInRecovery }] }
+      if (/pg_try_advisory_lock/i.test(statement)) return { rows: [{ acquired: lockAcquired }] }
+      if (/to_regclass/i.test(statement)) return { rows: [{ ledger_exists: ledgerExists, application_object_count: applicationTables }] }
+      if (/SELECT migration_name, checksum/i.test(statement)) return { rows: appliedRows }
+      if (/CREATE TABLE(?: IF NOT EXISTS)? expense_warrior_schema_migrations/i.test(statement)) {
+        ledgerExists = true
+        return { rows: [] }
+      }
+      if (/INSERT INTO expense_warrior_schema_migrations/i.test(statement)) {
+        appliedRows.push({ migration_name: params[0], checksum: params[1] })
+        return { rows: [] }
+      }
+      if (statement === failOnMigration) throw new Error('simulated migration failure')
+      return { rows: [] }
+    },
+    release() { statements.push('RELEASE') },
+  }
+  return { statements, get ledgerExists() { return ledgerExists }, pool: { async connect() { return client } } }
 }
 
 test('collectMigrations_listsSqlFilesInStableOrderWithChecksums', async () => {
@@ -148,6 +185,59 @@ test('planMigrations lists ordered checksums without writing', async () => {
     assert.deepEqual(result.steps.map(({ name }) => name), ['0001_first.sql', '0002_second.sql'])
     assert.ok(result.steps.every(({ checksum }) => /^[a-f0-9]{64}$/.test(checksum)))
     assert.ok(fixture.statements.every((sql) => /^(BEGIN READ ONLY|ROLLBACK|RELEASE|SELECT)\b/i.test(sql)))
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('runMigrations refuses an untracked schema, checksum drift, wrong target, and advisory-lock contention before SQL writes', async () => {
+  const directory = await createMigrationFixture()
+  try {
+    const cases = [
+      { pool: createApplyPool({ ledgerExists: false, applicationTables: 2 }), expected: 'MIGRATION_LEDGER_MISSING_FOR_NON_EMPTY_SCHEMA' },
+      { pool: createApplyPool({ ledgerExists: true, rows: [{ migration_name: '0001_first.sql', checksum: 'f'.repeat(64) }] }), expected: 'MIGRATION_CHECKSUM_MISMATCH' },
+      { pool: createApplyPool(), wrongTarget: { ...migrationTarget, database: 'itc' }, expected: 'MIGRATION_TARGET_IDENTITY_MISMATCH' },
+      { pool: createApplyPool({ isInRecovery: true }), expected: 'MIGRATION_TARGET_IDENTITY_MISMATCH' },
+      { pool: createApplyPool({ lockAcquired: false }), expected: 'MIGRATION_LOCK_UNAVAILABLE' },
+    ]
+    for (const item of cases) {
+      await assert.rejects(runMigrations({ pool: item.pool.pool, target: item.wrongTarget || migrationTarget, directory, env: { CONFIRM_EXPENSE_WARRIOR_MIGRATIONS: 'APPLY' } }),
+        (error) => error.code === item.expected)
+      assert.equal(item.pool.statements.some((statement) => statement === 'SELECT 1;' || statement === 'SELECT 2;'), false)
+    }
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('runMigrations bootstraps a new ledger and first migration in the same transaction', async () => {
+  const directory = await createMigrationFixture({ '0001_first.sql': 'SELECT 1;' })
+  const fixture = createApplyPool()
+  try {
+    const result = await runMigrations({ pool: fixture.pool, target: migrationTarget, directory, env: { CONFIRM_EXPENSE_WARRIOR_MIGRATIONS: 'APPLY' } })
+    assert.deepEqual(result.applied, ['0001_first.sql'])
+    const begin = fixture.statements.indexOf('BEGIN', fixture.statements.indexOf('ROLLBACK') + 1)
+    const ledger = fixture.statements.findIndex((statement) => /CREATE TABLE(?: IF NOT EXISTS)? expense_warrior_schema_migrations/.test(statement))
+    const migration = fixture.statements.indexOf('SELECT 1;')
+    const insert = fixture.statements.findIndex((statement) => /INSERT INTO expense_warrior_schema_migrations/.test(statement))
+    const commit = fixture.statements.indexOf('COMMIT')
+    assert.ok(begin >= 0 && begin < ledger && ledger < migration && migration < insert && insert < commit)
+    assert.ok(fixture.statements.includes("SET LOCAL lock_timeout = '5s'"))
+    assert.ok(fixture.statements.includes("SET LOCAL statement_timeout = '60s'"))
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('runMigrations rolls back bootstrap, migration SQL, and ledger row together on first failure', async () => {
+  const directory = await createMigrationFixture({ '0001_first.sql': 'FAIL;' })
+  const fixture = createApplyPool({ failOnMigration: 'FAIL;' })
+  try {
+    await assert.rejects(runMigrations({ pool: fixture.pool, target: migrationTarget, directory, env: { CONFIRM_EXPENSE_WARRIOR_MIGRATIONS: 'APPLY' } }))
+    assert.ok(fixture.statements.includes('BEGIN'))
+    assert.ok(fixture.statements.includes('ROLLBACK'))
+    assert.equal(fixture.statements.some((statement) => /INSERT INTO expense_warrior_schema_migrations/.test(statement)), false)
+    assert.equal(fixture.ledgerExists, false)
   } finally {
     await fs.rm(directory, { recursive: true, force: true })
   }

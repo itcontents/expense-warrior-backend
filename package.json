@@ -14,7 +14,8 @@
     "db:migrate": "node src/db/migrate.js apply",
     "db:migrate:apply": "node src/db/migrate.js apply",
     "db:migrate:status": "node src/db/migrate.js status",
-    "db:migrate:plan": "node src/db/migrate.js plan"
+    "db:migrate:plan": "node src/db/migrate.js plan",
+    "db:migrate:verify": "node src/db/migrate.js verify"
   },
   "dependencies": {
     "cloudinary": "^2.11.0",

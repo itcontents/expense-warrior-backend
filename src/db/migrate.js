@@ -2,6 +2,7 @@ const fs = require('node:fs/promises')
 const fsSync = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const { MIGRATION_POSTCONDITIONS, verifyMigrationPostconditions } = require('./migrationPostconditions')
 
 const MIGRATION_CONFIRMATION = 'APPLY'
 const ADVISORY_LOCK_ID = 455752
@@ -93,6 +94,14 @@ async function inspectMigrations({ pool, target, directory } = {}) {
   if (!target) throw migrationError('MIGRATION_TARGET_CONFIG_INVALID', 'A named, allowlisted migration target is required')
   const migrations = await collectMigrations(directory)
   const client = await pool.connect()
+  try {
+    return await inspectMigrationClient(client, target, migrations)
+  } finally {
+    client.release()
+  }
+}
+
+async function inspectMigrationClient(client, target, migrations) {
   let transactionStarted = false
   try {
     await client.query('BEGIN READ ONLY')
@@ -136,6 +145,22 @@ async function inspectMigrations({ pool, target, directory } = {}) {
       .filter(({ name }) => !appliedNames.has(name))
       .map(({ name, checksum }) => ({ name, checksum }))
 
+    if (schemaState.ledger_exists) {
+      if (applied.length === 0) blockers.push('EMPTY_MIGRATION_LEDGER')
+      if (migrations.every(({ name }) => MIGRATION_POSTCONDITIONS[name])) {
+        const schemaChecks = await verifyMigrationPostconditions(client, migrations)
+        const checkByName = new Map(schemaChecks.verified.map((check) => [check.migration, check]))
+        for (const migration of applied) {
+          if (!checkByName.get(migration.name)?.passed) blockers.push('POSTCONDITION_FAILED')
+        }
+        for (const migration of pending) {
+          const check = checkByName.get(migration.name)
+          if (!check || check.presentCount === 0) continue
+          blockers.push(check.passed ? 'MIGRATION_SCHEMA_AHEAD_OF_LEDGER' : 'PARTIAL_MIGRATION_SCHEMA')
+        }
+      }
+    }
+
     let state
     if (!schemaState.ledger_exists && Number(schemaState.application_object_count) > 0) {
       state = 'MANUAL_REVIEW_REQUIRED'
@@ -157,7 +182,6 @@ async function inspectMigrations({ pool, target, directory } = {}) {
     }
   } finally {
     if (transactionStarted) await client.query('ROLLBACK').catch(() => {})
-    client.release()
   }
 }
 
@@ -168,6 +192,36 @@ async function planMigrations(options = {}) {
     state: status.state,
     steps: status.pending.map(({ name, checksum }) => ({ name, checksum })),
     blockers: status.blockers,
+  }
+}
+
+async function verifyMigrations({ pool, target, directory } = {}) {
+  const migrations = await collectMigrations(directory)
+  const status = await inspectMigrations({ pool, target, directory })
+  const blockers = [...status.blockers]
+  if (status.state === 'NEW_EMPTY_DATABASE' || status.pending.length > 0) blockers.push('MIGRATIONS_PENDING')
+  if (status.state === 'MANUAL_REVIEW_REQUIRED' || status.state === 'BLOCKED' || blockers.length) {
+    return { target: status.target, verified: false, blockers: [...new Set(blockers)] }
+  }
+
+  const client = await pool.connect()
+  let transactionStarted = false
+  try {
+    await client.query('BEGIN READ ONLY')
+    transactionStarted = true
+    await assertMigrationTargetIdentity(client, target)
+    const postconditions = await verifyMigrationPostconditions(client, migrations)
+    blockers.push(...postconditions.blockers)
+    return {
+      target: status.target,
+      verified: postconditions.blockers.length === 0 && postconditions.verified.length === migrations.length && postconditions.verified.every(({ passed }) => passed),
+      blockers: [...new Set(blockers)],
+    }
+  } catch {
+    return { target: status.target, verified: false, blockers: ['MIGRATION_VERIFY_FAILED'] }
+  } finally {
+    if (transactionStarted) await client.query('ROLLBACK').catch(() => {})
+    client.release()
   }
 }
 
@@ -184,34 +238,37 @@ async function runMigrations({ pool, target, env = process.env, directory } = {}
   const client = await pool.connect()
   let locked = false
   try {
-    await assertMigrationTargetIdentity(client, target)
-    await client.query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_ID])
+    await client.query('BEGIN READ ONLY')
+    try {
+      await assertMigrationTargetIdentity(client, target)
+    } finally {
+      await client.query('ROLLBACK').catch(() => {})
+    }
+    const lock = await client.query('SELECT pg_try_advisory_lock($1) AS acquired', [ADVISORY_LOCK_ID])
+    if (lock.rows?.[0]?.acquired !== true) throw migrationError('MIGRATION_LOCK_UNAVAILABLE', 'Another migration process holds the migration lock')
     locked = true
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS expense_warrior_schema_migrations (
-        migration_name text PRIMARY KEY,
-        checksum char(64) NOT NULL,
-        applied_at timestamptz NOT NULL DEFAULT now()
-      )
-    `)
-
+    const status = await inspectMigrationClient(client, target, migrations)
+    if (status.state === 'MANUAL_REVIEW_REQUIRED' || status.state === 'BLOCKED') {
+      throw migrationError(status.blockers[0] || 'MIGRATION_PREFLIGHT_BLOCKED', 'Migration preflight is blocked; inspect status before applying')
+    }
+    let bootstrapLedger = status.state === 'NEW_EMPTY_DATABASE'
     const applied = []
-    for (const migration of migrations) {
-      const existing = await client.query(
-        'SELECT checksum FROM expense_warrior_schema_migrations WHERE migration_name = $1',
-        [migration.name]
-      )
-      if (existing.rows[0]) {
-        if (existing.rows[0].checksum !== migration.checksum) {
-          const error = new Error(`Applied migration checksum changed: ${migration.name}`)
-          error.code = 'MIGRATION_CHECKSUM_MISMATCH'
-          throw error
-        }
-        continue
-      }
-
+    for (const pending of status.pending) {
+      const migration = migrations.find(({ name }) => name === pending.name)
+      if (!migration) throw migrationError('MIGRATION_SOURCE_MISMATCH', 'Migration source changed during preflight')
       await client.query('BEGIN')
       try {
+        await client.query("SET LOCAL lock_timeout = '5s'")
+        await client.query("SET LOCAL statement_timeout = '60s'")
+        if (bootstrapLedger) {
+          await client.query(`
+            CREATE TABLE expense_warrior_schema_migrations (
+              migration_name text PRIMARY KEY,
+              checksum char(64) NOT NULL,
+              applied_at timestamptz NOT NULL DEFAULT now()
+            )
+          `)
+        }
         await client.query(migration.sql)
         await client.query(
           'INSERT INTO expense_warrior_schema_migrations (migration_name, checksum) VALUES ($1, $2)',
@@ -219,6 +276,7 @@ async function runMigrations({ pool, target, env = process.env, directory } = {}
         )
         await client.query('COMMIT')
         applied.push(migration.name)
+        if (bootstrapLedger) bootstrapLedger = false
       } catch (error) {
         await client.query('ROLLBACK')
         throw error
@@ -240,7 +298,7 @@ if (require.main === module) {
   let pool
   try {
     const command = process.argv[2] || 'apply'
-    if (!['apply', 'status', 'plan'].includes(command)) throw migrationError('MIGRATION_COMMAND_INVALID', 'Unknown migration command')
+    if (!['apply', 'status', 'plan', 'verify'].includes(command)) throw migrationError('MIGRATION_COMMAND_INVALID', 'Unknown migration command')
     if (command === 'apply') assertMigrationAllowed()
     const migrationEnvPath = path.resolve(process.cwd(), '.env.migrations')
     const migrationEnv = fsSync.existsSync(migrationEnvPath)
@@ -253,7 +311,9 @@ if (require.main === module) {
       ? inspectMigrations({ pool, target })
       : command === 'plan'
         ? planMigrations({ pool, target })
-        : runMigrations({ pool, target })
+        : command === 'verify'
+          ? verifyMigrations({ pool, target })
+          : runMigrations({ pool, target })
     operation
       .then((result) => {
         if (command === 'apply') {
@@ -261,7 +321,7 @@ if (require.main === module) {
           return
         }
         console.log(JSON.stringify({ event: `migrations_${command}`, ...result }))
-        if (result.state === 'BLOCKED' || result.state === 'MANUAL_REVIEW_REQUIRED') process.exitCode = 1
+        if (result.state === 'BLOCKED' || result.state === 'MANUAL_REVIEW_REQUIRED' || result.verified === false) process.exitCode = 1
       })
       .catch((error) => {
         console.error(JSON.stringify({ event: 'migration_failed', code: error.code || 'MIGRATION_FAILED' }))
@@ -274,4 +334,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations }
+module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations, verifyMigrations }
