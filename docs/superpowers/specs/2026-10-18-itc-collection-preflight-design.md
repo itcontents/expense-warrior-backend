@@ -23,7 +23,7 @@ The preflight reduces known setup failures. It cannot hold database state across
 
 Add `POST /api/v1/internal/expense-warrior/collections/preflight` to the ITC-owned finance router and a matching method to Expense Warrior's `ItcFinanceClient`.
 
-The request is authenticated by the existing ITC service HMAC middleware, including its timestamp, nonce, request-ID, raw-body signature, and replay claim. Use the existing service idempotency header format; the operation is read-only and does not create an idempotency record.
+The request is authenticated by the existing ITC service HMAC middleware, including its timestamp, nonce, request-ID, raw-body signature, and persisted replay claim. That nonce claim is an existing authentication-security write and remains required. The readiness operation itself is read-only and does not create an idempotency record or any finance/business record.
 
 Request body:
 
@@ -63,7 +63,7 @@ In one `REPEATABLE READ READ ONLY` transaction, ITC checks:
 5. For `REVENUE`, the selected account is an active, postable revenue account.
 6. For `CUSTOMER_CREDIT`, the customer is an active customer account and dedicated account 2020 is an active, postable customer-credit liability account.
 
-The transaction issues no DDL, DML, row locks, ledger writes, reservations, or durable audit rows. It is ended with rollback. No ITC database is queried by Expense Warrior directly.
+The readiness transaction issues no DDL, DML, row locks, ledger writes, reservations, or durable business/audit rows. It is ended with rollback. Separately, the existing HMAC middleware persists the nonce claim before route dispatch to prevent request replay. No ITC database is queried by Expense Warrior directly.
 
 ## 5. Expense Warrior attempt behavior
 

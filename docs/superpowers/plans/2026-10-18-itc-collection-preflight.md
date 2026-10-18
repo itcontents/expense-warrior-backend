@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - The preflight is signed by ITC's existing service HMAC middleware.
-- The ITC check runs in one `REPEATABLE READ READ ONLY` transaction and performs no DDL, DML, row locks, ledger writes, reservations, or durable audit rows.
+- The ITC readiness check runs in one `REPEATABLE READ READ ONLY` transaction and performs no DDL, DML, row locks, ledger writes, reservations, or durable business/audit rows. The existing HMAC middleware still persists its replay nonce claim.
 - The preflight applies only to `REVENUE` and `CUSTOMER_CREDIT`; A/R continues to reserve the full invoice before provider initiation.
 - PawaPay signed requests, the signed-requests-only startup gate, provider identity snapshots, authoritative polling, evidence matching, and ITC's atomic posting path remain required.
 - Validation must not apply or adopt a migration, contact a payment provider, or create a payment.
@@ -68,7 +68,7 @@
 - Consumes: `service.preflightCollection(input)` from Task 1 and the router's existing `authenticate` middleware.
 - Produces: `POST /collections/preflight` under `/api/v1/internal/expense-warrior`, returning `{ success: true, data: { ready: true } }`.
 
-- [ ] **Step 1: Add failing route tests** for successful revenue/customer-credit targets, malformed UUID/version/provider fields, unknown body keys, unsupported targets including A/R, missing service method, stable safe error envelopes, and authenticated middleware enforcement.
+- [ ] **Step 1: Add failing route tests** for successful revenue/customer-credit targets, malformed UUID/version/provider fields, unknown body keys, unsupported targets including A/R, missing service method, stable safe error envelopes, and authenticated middleware enforcement. Assert rejected authentication never invokes `preflightCollection`.
 - [ ] **Step 2: Run** `node --test tests/expenseWarriorFinanceRoutes.test.js`; confirm the new route tests fail before implementation.
 - [ ] **Step 3: Add a Joi schema** with strict unknown-field rejection, exact target-specific fields, provider/account identity, actor, payment-link ID, and collection-attempt ID.
 - [ ] **Step 4: Add the route** that delegates the normalized request to the service and uses the existing `sendFailure` behavior. Do not add a public route or change the HMAC middleware contract.
