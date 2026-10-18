@@ -61,6 +61,73 @@ test('reserve signs the exact path, JSON bytes, idempotency key, and request ide
   assert.equal(call.options.headers['X-Request-Id'], requestId)
 })
 
+test('preflightCollectionTarget signs the exact request and accepts only an affirmative readiness result', async () => {
+  let call
+  const client = new ItcFinanceClient({
+    baseUrl: 'https://itc.test/api/v1/', keyId, secretBase64,
+    fetchImpl: async (url, options) => {
+      call = { url: String(url), options }
+      return response(200, { success: true, data: { ready: true } })
+    },
+    nonceFactory: () => nonce,
+    requestIdFactory: () => requestId,
+    now: () => 1792080000000,
+  })
+  const payload = { target_type: 'REVENUE', revenue_account_code: '4000', currency: 'ZMW' }
+  const idempotencyKey = 'collection-preflight-0001'
+
+  assert.deepEqual(await client.preflightCollectionTarget(payload, idempotencyKey, requestId), { ready: true })
+  assert.equal(call.url, 'https://itc.test/api/v1/internal/expense-warrior/collections/preflight')
+  assert.equal(call.options.method, 'POST')
+  assert.equal(call.options.body, JSON.stringify(payload))
+  assert.equal(call.options.headers['Idempotency-Key'], idempotencyKey)
+  assert.equal(call.options.headers['X-Request-Id'], requestId)
+  const timestamp = String(Math.floor(1792080000000 / 1000))
+  const canonical = [
+    keyId,
+    timestamp,
+    nonce,
+    'POST',
+    '/api/v1/internal/expense-warrior/collections/preflight',
+    requestId,
+    idempotencyKey,
+    crypto.createHash('sha256').update(call.options.body).digest('hex'),
+  ].join('\n')
+  const expected = crypto.createHmac('sha256', secret).update(canonical).digest('base64url')
+  assert.equal(call.options.headers['X-ITC-Signature'], expected)
+
+  const extendedResponse = new ItcFinanceClient({
+    baseUrl: 'https://itc.test/api/v1', keyId, secretBase64,
+    fetchImpl: async () => response(200, { success: true, data: { ready: true, evaluated_at: '2026-10-18T12:00:00.000Z' } }),
+    nonceFactory: () => nonce, now: () => 1792080000000,
+  })
+  assert.deepEqual(await extendedResponse.preflightCollectionTarget(payload, idempotencyKey, requestId), { ready: true })
+})
+
+test('preflightCollectionTarget rejects missing, malformed, or negative readiness responses consistently', async () => {
+  for (const data of [undefined, {}, { ready: false }, { ready: 'true' }, []]) {
+    const client = new ItcFinanceClient({
+      baseUrl: 'https://itc.test/api/v1', keyId, secretBase64,
+      fetchImpl: async () => response(200, { success: true, data }),
+      nonceFactory: () => nonce, now: () => 1792080000000,
+    })
+    await assert.rejects(client.preflightCollectionTarget({ target_type: 'REVENUE' }, 'collection-preflight-0001', requestId), {
+      name: 'ItcFinanceError', code: 'ITC_FINANCE_RESPONSE_INVALID', statusCode: 502,
+    })
+  }
+})
+
+test('preflightCollectionTarget preserves stable ITC error envelope codes', async () => {
+  const client = new ItcFinanceClient({
+    baseUrl: 'https://itc.test/api/v1', keyId, secretBase64,
+    fetchImpl: async () => response(409, { success: false, error: { code: 'COLLECTION_TARGET_NOT_READY' } }),
+    nonceFactory: () => nonce, now: () => 1792080000000,
+  })
+  await assert.rejects(client.preflightCollectionTarget({ target_type: 'REVENUE' }, 'collection-preflight-0001', requestId), {
+    name: 'ItcFinanceError', code: 'COLLECTION_TARGET_NOT_READY', statusCode: 409,
+  })
+})
+
 test('release uses the hold-specific signed route and preserves ITC business errors', async () => {
   let call
   const client = new ItcFinanceClient({
