@@ -110,19 +110,6 @@ test('payment-link repository rejects changed content for a reused key without c
   assert.equal(pool.state.auditEvents, 1)
 })
 
-test('payment-link repository rejects deferred A/R targets before opening a transaction', async () => {
-  let connections = 0
-  const repository = createPaymentLinkRepository({ pool: {
-    connect: async () => { connections++; throw new Error('must not open transaction') },
-    query: async () => { throw new Error('must not query') },
-  } })
-  await assert.rejects(repository.create({
-    ...input,
-    target: { type: 'AR_SETTLEMENT', customerId: '50000000-0000-4000-8000-000000000001', receivableId: '60000000-0000-4000-8000-000000000002' },
-  }), (error) => error instanceof PaymentLinkError && error.code === 'PAYMENT_LINK_TARGET_DEFERRED')
-  assert.equal(connections, 0)
-})
-
 test('payment-link repository finds an existing attempt by opaque link hash and idempotency key', async () => {
   const expected = {
     attempt_id: '11111111-1111-4111-8111-111111111111',

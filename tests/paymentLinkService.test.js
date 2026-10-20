@@ -49,14 +49,3 @@ test('createLink requires an exact recognized target object', async () => {
   }, 'c3d5fcb6-9424-41b8-9f8b-5f14bb8e3f66'), (error) => error instanceof PaymentLinkError && error.code === 'PAYMENT_LINK_TARGET_INVALID')
   assert.equal(calls, 0)
 })
-
-test('createLink rejects deferred A/R settlement targets before persistence', async () => {
-  let calls = 0
-  const service = createPaymentLinkService({ repository: { create: async () => { calls++ } } })
-  await assert.rejects(service.createLink(actor, {
-    amount: '125.00', description: 'Invoice',
-    target: { type: 'AR_SETTLEMENT', customer_id: actor.customerId, receivable_id: '60000000-0000-4000-8000-000000000001' },
-    publicToken: 'A'.repeat(64),
-  }, 'c3d5fcb6-9424-41b8-9f8b-5f14bb8e3f66'), (error) => error instanceof PaymentLinkError && error.code === 'PAYMENT_LINK_TARGET_DEFERRED')
-  assert.equal(calls, 0)
-})

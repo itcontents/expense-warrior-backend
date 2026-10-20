@@ -146,6 +146,19 @@ function createPaymentLinkRepository({ pool } = {}) {
         if (!attempt || attempt.state !== 'SUCCEEDED' || attempt.ledger_operation_id !== operationId) {
           throw new PaymentLinkError('PAYMENT_COLLECTION_STATE_CONFLICT', 409)
         }
+        const link = (await client.query(`SELECT collection_target_type, receivable_id FROM payment_links
+          WHERE payment_link_id = $1 FOR SHARE`, [attempt.payment_link_id])).rows[0]
+        if (link?.collection_target_type === 'AR_SETTLEMENT') {
+          const disabled = await client.query(`UPDATE payment_links
+             SET status = 'DISABLED', disabled_at = transaction_timestamp(), disabled_by_customer_id = created_by_customer_id
+           WHERE collection_target_type = 'AR_SETTLEMENT' AND receivable_id = $1 AND status = 'ACTIVE'
+           RETURNING payment_link_id, created_by_customer_id`, [link.receivable_id])
+          for (const row of disabled.rows) {
+            await client.query(`INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
+              VALUES ($1, 'payment_link.ar_settlement_completed', 'payment_link', $2, $3::jsonb)`,
+            [row.created_by_customer_id, row.payment_link_id, JSON.stringify({ receivable_id: link.receivable_id, operation_id: operationId })])
+          }
+        }
         await client.query('COMMIT')
         return attempt
       } catch (error) {
@@ -155,7 +168,6 @@ function createPaymentLinkRepository({ pool } = {}) {
       } finally { client.release() }
     },
     async create({ amount, description, target, tokenHash, idempotencyKey, requestFingerprint, actorCustomerId }) {
-      if (target?.type === 'AR_SETTLEMENT') throw new PaymentLinkError('PAYMENT_LINK_TARGET_DEFERRED', 409)
       const client = await pool.connect()
       try {
         await client.query('BEGIN')

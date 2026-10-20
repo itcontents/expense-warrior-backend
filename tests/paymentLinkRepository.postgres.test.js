@@ -124,10 +124,39 @@ test('payment-link repository persists idempotent links and verified collections
     assert.equal(distinctPayment.attempt.network_code, attemptInput.networkCode,
       'different providers may safely use the same network code')
 
+    const customerId = randomUUID()
+    const receivableId = randomUUID()
+    const arLinkInputs = [0, 1].map((index) => ({
+      ...linkInput,
+      amount: '120.00',
+      description: `A/R PostgreSQL collection test ${index}`,
+      target: { type: 'AR_SETTLEMENT', customerId, receivableId },
+      tokenHash: String(index + 2).repeat(64),
+      requestFingerprint: String(index + 2).repeat(64),
+      idempotencyKey: randomUUID(),
+    }))
+    const arLinks = await Promise.all(arLinkInputs.map((entry) => repository.create(entry)))
+    const arAttempt = await repository.createAttempt({
+      ...attemptInput,
+      attemptId: randomUUID(),
+      tokenHash: arLinkInputs[0].tokenHash,
+      idempotencyKey: randomUUID(),
+      requestFingerprint: '2'.repeat(64),
+    })
+    await repository.updateAttempt(arAttempt.attempt.attempt_id, {
+      state: 'VERIFIED_PENDING_LEDGER', providerStatus: 'COMPLETED', verified: true,
+    })
+    await repository.markAttemptSucceeded(arAttempt.attempt.attempt_id, randomUUID())
+    const arStates = await pool.query(`
+      SELECT status FROM payment_links WHERE payment_link_id = ANY($1::uuid[])
+    `, [arLinks.map(({ link }) => link.payment_link_id)])
+    assert.deepEqual(arStates.rows.map(({ status }) => status), ['DISABLED', 'DISABLED'],
+      'verified A/R collection must close every active link for the settled receivable')
+
     const audit = await pool.query(`SELECT count(*)::int AS count FROM audit_events`)
-    assert.equal(audit.rows[0].count, 1, 'creation replay must not duplicate the audit record')
+    assert.equal(audit.rows[0].count, 5, 'creation replay must not duplicate the audit record; A/R closures are audited')
     const attempts = await pool.query(`SELECT count(*)::int AS count FROM payment_link_attempts`)
-    assert.equal(attempts.rows[0].count, 2, 'attempt replay must not insert another provider attempt')
+    assert.equal(attempts.rows[0].count, 3, 'attempt replay must not insert another provider attempt')
 
     const persisted = await pool.query(`
       SELECT state, provider_code, network_code, provider_account_id, provider_account_version, ledger_operation_id
