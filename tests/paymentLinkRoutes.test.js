@@ -41,17 +41,15 @@ test('payment-link management is admin-only and creates a fixed amount reusable 
   assert.deepEqual(calls[0].input.target, { type: 'REVENUE', revenue_account_code: '4000' })
 })
 
-test('invoice settlement links require the exact eligible delivered ITC receivable balance', async (t) => {
+test('deferred A/R settlement targets are rejected before finance lookup or link creation', async (t) => {
   const creates = []
+  let lookups = 0
   const app = express()
   app.use(express.json())
   app.use(createPaymentLinkRouter({
     identityClient: { getSession: async () => ({ customerId: 'admin-id', role: 'admin', active: true }) },
     paymentLinkService: { createLink: async (...args) => { creates.push(args); return { link: {}, token: 't'.repeat(43) } }, listLinks: async () => ({ items: [] }), disableLink: async () => ({}) },
-    itcFinanceClient: { getReceivable: async () => ({
-      receivable_id: '50000000-0000-4000-8000-000000000002', customer_id: '50000000-0000-4000-8000-000000000001',
-      outstanding_amount: '250.00', status: 'OPEN', currency: 'ZMW',
-    }) },
+    itcFinanceClient: { getReceivable: async () => { lookups++; return { outstanding_amount: '250.00' } } },
   }))
   const { server, url } = await listen(app)
   t.after(() => server.close())
@@ -59,9 +57,9 @@ test('invoice settlement links require the exact eligible delivered ITC receivab
     method: 'POST', headers: { cookie: 'itc_backoffice_access=admin', 'content-type': 'application/json', 'Idempotency-Key': 'c3d5fcb6-9424-41b8-9f8b-5f14bb8e3f66' },
     body: JSON.stringify({ amount: '250.00', description: 'Invoice', public_token: 'a'.repeat(64), target: { type: 'AR_SETTLEMENT', customer_id: '50000000-0000-4000-8000-000000000001', receivable_id: '50000000-0000-4000-8000-000000000002' } }),
   })
-  assert.equal(response.status, 201)
-  assert.equal(creates.length, 1)
-  assert.deepEqual(creates[0][1].target, { type: 'AR_SETTLEMENT', customer_id: '50000000-0000-4000-8000-000000000001', receivable_id: '50000000-0000-4000-8000-000000000002' })
+  assert.equal(response.status, 400)
+  assert.equal(creates.length, 0)
+  assert.equal(lookups, 0)
 })
 
 test('payment-link management rejects invalid amount and unknown fields', async (t) => {

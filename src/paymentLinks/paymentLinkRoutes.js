@@ -11,7 +11,6 @@ const createSchema = Joi.object({
   target: Joi.alternatives().try(
     Joi.object({ type: Joi.string().valid('REVENUE').required(), revenue_account_code: Joi.string().pattern(/^\d{4}$/).required() }).unknown(false),
     Joi.object({ type: Joi.string().valid('CUSTOMER_CREDIT').required(), customer_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required() }).unknown(false),
-    Joi.object({ type: Joi.string().valid('AR_SETTLEMENT').required(), customer_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required(), receivable_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required() }).unknown(false),
   ).required(),
 }).unknown(false)
 const listSchema = Joi.object({ limit: Joi.number().integer().min(1).max(100), offset: Joi.number().integer().min(0).max(1000000) }).unknown(false)
@@ -19,11 +18,6 @@ const customerSearchSchema = Joi.object({
   search: Joi.string().trim().min(2).max(100).required(),
   limit: Joi.number().integer().min(1).max(50).default(25),
   offset: Joi.number().integer().min(0).max(1000000).default(0),
-}).unknown(false)
-const receivableListSchema = Joi.object({
-  customer_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required(),
-  limit: Joi.number().integer().min(1).max(100).default(50),
-  cursor: Joi.string().max(512),
 }).unknown(false)
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -74,22 +68,6 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
       return res.status(status).json({ error: { code, message: 'Revenue accounts are temporarily unavailable' } })
     }
   })
-  router.get('/payment-links/receivables', requireSession, adminOnly, async (req, res) => {
-    const { value, error } = receivableListSchema.validate(req.query, { abortEarly: false, convert: true })
-    if (error) return res.status(400).json({ error: { code: 'INVALID_RECEIVABLE_FILTER', message: 'The invoice filters are invalid' } })
-    if (!itcFinanceClient || typeof itcFinanceClient.getReceivables !== 'function') {
-      return res.status(503).json({ error: { code: 'RECEIVABLES_UNAVAILABLE', message: 'Eligible invoices are temporarily unavailable' } })
-    }
-    try {
-      const receivables = await itcFinanceClient.getReceivables(value.customer_id, { limit: value.limit, cursor: value.cursor || null }, req.requestId)
-      res.set('Cache-Control', 'private, no-store')
-      return res.status(200).json({ data: { receivables } })
-    } catch (cause) {
-      const status = cause instanceof ItcFinanceError ? cause.statusCode : 503
-      const code = cause instanceof ItcFinanceError ? cause.code : 'RECEIVABLES_UNAVAILABLE'
-      return res.status(status).json({ error: { code, message: 'Eligible invoices are temporarily unavailable' } })
-    }
-  })
   router.post('/payment-links', requireSession, adminOnly, async (req, res) => {
     const { value, error } = createSchema.validate(req.body, { abortEarly: false, convert: false })
     if (error) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_LINK', message: 'Add a description and a fixed ZMW amount with two decimal places' } })
@@ -106,11 +84,6 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
         const balance = await itcFinanceClient.getCustomerCreditBalance(value.target.customer_id, req.requestId)
         if (balance.customer_id.toLowerCase() !== value.target.customer_id.toLowerCase()) {
           return res.status(422).json({ error: { code: 'CUSTOMER_UNAVAILABLE', message: 'Choose an active ITC customer account' } })
-        }
-      } else {
-        const receivable = await itcFinanceClient.getReceivable(value.target.customer_id, value.target.receivable_id, req.requestId)
-        if (receivable.outstanding_amount !== value.amount) {
-          return res.status(422).json({ error: { code: 'RECEIVABLE_AMOUNT_MISMATCH', message: 'Choose a delivered invoice and enter its full outstanding balance' } })
         }
       }
       const result = await paymentLinkService.createLink(req.actor, { ...value, publicToken: value.public_token }, idempotencyKey)
