@@ -33,6 +33,15 @@ const SOURCE_ONLY_COLUMNS = Object.freeze({
     ADD COLUMN provider_account_id uuid,
     ADD COLUMN provider_account_version integer,
     ADD COLUMN network_label varchar(80),
+    ADD COLUMN receivable_reservation_id uuid,
+    ADD COLUMN receivable_reservation_state text,
+    ADD CONSTRAINT payment_link_receivable_reservation_state_test_check CHECK (
+      receivable_reservation_state IS NULL OR receivable_reservation_state IN ('PENDING','UNKNOWN','ACTIVE','RELEASED','APPLIED')
+    ),
+    ADD CONSTRAINT payment_link_receivable_reservation_pair_test_check CHECK (
+      (receivable_reservation_id IS NULL AND receivable_reservation_state IS NULL)
+      OR (receivable_reservation_id IS NOT NULL AND receivable_reservation_state IS NOT NULL)
+    ),
     ADD CONSTRAINT payment_link_provider_account_pair_test_check CHECK (
       (provider_account_id IS NULL AND provider_account_version IS NULL)
       OR (provider_account_id IS NOT NULL AND provider_account_version > 0)
@@ -83,7 +92,16 @@ const PAYOUT_RETRY_CONSTRAINTS = `
 
 async function createTemporaryTables(client, tableNames) {
   for (const table of tableNames) {
-    await client.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING ALL) ON COMMIT PRESERVE ROWS`)
+    if (table === 'payment_link_receivable_closures') {
+      await client.query(`CREATE TEMP TABLE payment_link_receivable_closures (
+        payment_link_id uuid PRIMARY KEY, receivable_id uuid NOT NULL,
+        collection_operation_id uuid NOT NULL,
+        settled_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+        UNIQUE (payment_link_id, receivable_id, collection_operation_id)
+      ) ON COMMIT PRESERVE ROWS`)
+    } else {
+      await client.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING ALL) ON COMMIT PRESERVE ROWS`)
+    }
   }
 
   // The local database intentionally does not have unapplied provider add-on

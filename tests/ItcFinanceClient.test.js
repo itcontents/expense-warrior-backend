@@ -300,7 +300,7 @@ test('customer collection methods use signed ITC routes and validate authoritati
   const receivable = {
     receivable_id: operationId, customer_id: '50000000-0000-4000-8000-000000000001',
     invoice_number: 'Q-2026-001', order_id: '70000000-0000-4000-8000-000000000001', original_amount: '75.00', applied_amount: '0.00',
-    outstanding_amount: '75.00', currency: 'ZMW', status: 'OPEN',
+    outstanding_amount: '75.00', currency: 'ZMW', status: 'PARTIALLY_CREDITED',
     issued_at: '2026-10-15T12:00:00.000Z',
   }
   const operation = { operation_id: operationId, state: 'APPLIED' }

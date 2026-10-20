@@ -12,9 +12,12 @@ function isPositiveAmount(amount) {
 function normalizeCollectionTarget(target) {
   if (!target || typeof target !== 'object' || Array.isArray(target)) throw new PaymentLinkError('PAYMENT_LINK_TARGET_INVALID', 400)
   const keys = Object.keys(target).sort().join(',')
-  if (target.type === 'AR_SETTLEMENT') throw new PaymentLinkError('PAYMENT_LINK_TARGET_DEFERRED', 409)
   if (target.type === 'REVENUE' && keys === 'revenue_account_code,type' && /^\d{4}$/.test(String(target.revenue_account_code || ''))) {
     return { type: target.type, revenueAccountCode: target.revenue_account_code }
+  }
+  if (target.type === 'AR_SETTLEMENT' && keys === 'customer_id,receivable_id,type' &&
+      UUID.test(String(target.customer_id || '')) && UUID.test(String(target.receivable_id || ''))) {
+    return { type: target.type, customerId: target.customer_id.toLowerCase(), receivableId: target.receivable_id.toLowerCase() }
   }
   if (target.type === 'CUSTOMER_CREDIT' && keys === 'customer_id,type' && UUID.test(String(target.customer_id || ''))) {
     return { type: target.type, customerId: target.customer_id.toLowerCase() }

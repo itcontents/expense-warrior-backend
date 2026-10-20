@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
-const { createPublicPaymentService } = require('../src/paymentLinks/publicPaymentService')
+const { createPublicPaymentService, postConfirmedCollection } = require('../src/paymentLinks/publicPaymentService')
 
 const token = 'T'.repeat(43)
 const attemptId = '10000000-0000-4000-8000-000000000001'
@@ -322,7 +322,7 @@ test('confirmed PawaPay success posts the explicit link target and issues a rece
   assert.equal(result.status, 'SUCCEEDED')
   assert.equal(result.receipt_available, true)
   assert.equal(calls[0].payload.collection_attempt_id, attemptId)
-  assert.equal(calls[0].payload.revenue_account_code, '4000')
+  assert.deepEqual(calls[0].payload.target, { type: 'REVENUE', revenue_account_code: '4000' })
   assert.match(calls[0].key, /^ew-collect-[a-f0-9]{64}$/)
   assert.deepEqual(calls[1], { id: attemptId, operationId: succeeded.ledger_operation_id })
 })
@@ -383,7 +383,7 @@ test('post-success ITC failure stays unreceipted and refresh retries the same po
   assert.equal(providerCalls, 0)
   assert.equal(itcCalls.length, 2)
   assert.deepEqual(itcCalls[0], itcCalls[1])
-  assert.equal(itcCalls[0].payload.customer_id, attempt.customer_id)
+  assert.deepEqual(itcCalls[0].payload.target, { type: 'CUSTOMER_CREDIT', customer_id: attempt.customer_id })
 })
 
 test('provider success with mismatched destination remains unknown and uncredited', async () => {
@@ -446,97 +446,109 @@ test('getLink hides configured networks whose amount rules cannot accept the fix
   assert.deepEqual((await service.getLink(token)).available_networks, [])
 })
 
-test('startAttempt rejects deferred A/R links before reservation, persistence, or provider initiation', async () => {
-  let writes = 0
-  let providerCalls = 0
+test('A/R collection reserves the full invoice balance before the provider call and skips revenue preflight', async () => {
+  const calls = []
   const link = {
-    ...baseLink, collection_target_type: 'AR_SETTLEMENT',
+    ...baseLink, created_by_customer_id: '60000000-0000-4000-8000-000000000001', collection_target_type: 'AR_SETTLEMENT',
     customer_id: '50000000-0000-4000-8000-000000000001',
     receivable_id: '60000000-0000-4000-8000-000000000001',
   }
+  const attempt = { ...baseAttempt, payment_link_id: link.payment_link_id, receivable_reservation_id: attemptId, receivable_reservation_state: 'PENDING' }
   const service = createPublicPaymentService({
     repository: {
       getPublicLink: async () => link,
-      createAttempt: async () => { writes++; throw new Error('must not persist') },
+      createAttempt: async () => { calls.push('persist'); return { link, attempt, replayed: false } },
+      updateReceivableReservationState: async (_id, state) => { calls.push(`reservation:${state}`) },
+      updateAttempt: async (_id, update) => ({ ...attempt, ...update }),
     },
     providerRegistry: {
       getActiveNetworks: async () => [mtnDepositOption],
       getAccountIdentity: () => providerAccountIdentity,
-      get: () => ({ initiateDeposit: async () => { providerCalls++; return acceptedDeposit() } }),
+      get: () => ({ initiateDeposit: async () => { calls.push('provider'); return acceptedDeposit() }, getDepositStatus: async () => null }),
     },
-    itcFinanceClient: { reserveCustomerReceivablePayment: async () => { writes++; } },
+    itcFinanceClient: { reserveCustomerReceivablePayment: async (...args) => {
+      calls.push('reserve')
+      assert.equal(args[0].amount, '125.00')
+      assert.equal(args[0].receivable_id, link.receivable_id)
+      return { reservation: { reservation_id: attemptId, receivable_id: link.receivable_id, collection_attempt_id: attemptId, amount: '125.00', currency_code: 'ZMW', state: 'ACTIVE' } }
+    } },
+    idFactory: () => attemptId,
   })
-  await assert.rejects(
-    service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey),
-    { code: 'PAYMENT_LINK_TARGET_DEFERRED', statusCode: 409 },
-  )
-  assert.equal(writes, 0)
-  assert.equal(providerCalls, 0)
+  await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
+  assert.deepEqual(calls, ['persist', 'reserve', 'reservation:ACTIVE', 'provider'])
 })
 
-test('refreshAttempt and getReceipt reject terminal attempts attached to deferred A/R links', async () => {
+test('unknown ITC reservation outcome never starts PawaPay and remains recoverable under the same attempt', async () => {
   let providerCalls = 0
-  let updates = 0
-  const arAttempt = {
-    ...baseAttempt,
-    state: 'SUCCEEDED',
-    collection_target_type: 'AR_SETTLEMENT',
-    public_token_hash: crypto.createHash('sha256').update(token).digest('hex'),
-    payment_link_id: baseLink.payment_link_id,
-    ledger_operation_id: '30000000-0000-4000-8000-000000000001',
-    verified_at: '2026-10-15T12:01:00.000Z',
-    network_label: 'MTN MoMo',
-    description: 'Legacy A/R settlement',
-  }
+  const link = { ...baseLink, created_by_customer_id: '60000000-0000-4000-8000-000000000001', collection_target_type: 'AR_SETTLEMENT', customer_id: '50000000-0000-4000-8000-000000000001', receivable_id: '60000000-0000-4000-8000-000000000002' }
+  let attempt = { ...baseAttempt, payment_link_id: link.payment_link_id, receivable_reservation_id: attemptId, receivable_reservation_state: 'PENDING' }
   const service = createPublicPaymentService({
     repository: {
-      getPublicAttempt: async () => arAttempt,
-      updateAttempt: async () => { updates++; return arAttempt },
+      getPublicLink: async () => link,
+      createAttempt: async () => ({ link, attempt, replayed: false }),
+      updateAttempt: async (_id, update) => { attempt = { ...attempt, ...update }; return attempt },
+      updateReceivableReservationState: async (_id, state) => { attempt.receivable_reservation_state = state },
+      getPublicAttempt: async () => attempt,
     },
-    providerRegistry: { get: () => { providerCalls++; return { getDepositStatus: async () => null } } },
+    providerRegistry: { getActiveNetworks: async () => [mtnDepositOption], getAccountIdentity: () => providerAccountIdentity, get: () => ({ initiateDeposit: async () => { providerCalls++; return acceptedDeposit() }, getDepositStatus: async () => null }) },
+    itcFinanceClient: { reserveCustomerReceivablePayment: async () => { throw Object.assign(new Error('timeout'), { outcomeUnknown: true }) } },
+    idFactory: () => attemptId,
   })
-
-  await assert.rejects(service.refreshAttempt(token, attemptId), { code: 'PAYMENT_LINK_TARGET_DEFERRED' })
-  await assert.rejects(service.getReceipt(token, attemptId), { code: 'PAYMENT_LINK_TARGET_DEFERRED' })
+  const result = await service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey)
+  assert.equal(result.attempt.status, 'UNKNOWN')
+  assert.equal(attempt.receivable_reservation_state, 'UNKNOWN')
   assert.equal(providerCalls, 0)
-  assert.equal(updates, 0)
 })
 
-test('startAttempt rejects idempotent replays for legacy A/R links before returning or resuming them', async () => {
-  const legacyArAttempt = {
-    ...baseAttempt,
-    request_fingerprint: crypto.createHash('sha256').update(JSON.stringify(['MTN_MOMO_ZMB', '260763456789'])).digest('hex'),
-    collection_target_type: 'AR_SETTLEMENT',
-    receivable_id: '60000000-0000-4000-8000-000000000001',
+test('a lost ITC release response retries the same terminal release without reserving or recharging', async () => {
+  const calls = []
+  const link = { ...baseLink, created_by_customer_id: '60000000-0000-4000-8000-000000000001', collection_target_type: 'AR_SETTLEMENT', customer_id: '50000000-0000-4000-8000-000000000001', receivable_id: '60000000-0000-4000-8000-000000000002' }
+  let attempt = {
+    ...baseAttempt, state: 'UNKNOWN', payment_link_id: link.payment_link_id,
+    collection_target_type: 'AR_SETTLEMENT', created_by_customer_id: link.created_by_customer_id,
+    customer_id: link.customer_id, receivable_id: link.receivable_id,
+    receivable_reservation_id: attemptId, receivable_reservation_state: 'UNKNOWN', provider_status: 'FAILED',
   }
-  let providerCalls = 0
+  let releases = 0
   const service = createPublicPaymentService({
-    repository: { getAttemptByIdempotency: async () => legacyArAttempt },
-    providerRegistry: { get: () => ({ initiateDeposit: async () => { providerCalls++; return acceptedDeposit() } }) },
+    repository: {
+      getPublicAttempt: async () => attempt,
+      updateReceivableReservationState: async (_id, state) => { attempt = { ...attempt, receivable_reservation_state: state } },
+      updateAttempt: async (_id, update) => { attempt = { ...attempt, ...update }; return attempt },
+    },
+    itcFinanceClient: { releaseCustomerReceivablePayment: async (_id, payload, key) => {
+      calls.push({ payload, key }); releases += 1
+      if (releases === 1) throw new Error('response lost')
+      return { reservation: { state: 'RELEASED' } }
+    }, reserveCustomerReceivablePayment: async () => { assert.fail('must repeat release directly') } },
+    providerRegistry: { get: () => { assert.fail('terminal failure must not call provider') } },
   })
-  await assert.rejects(
-    service.startAttempt(token, { network_code: 'MTN_MOMO_ZMB', phone_number: '260763456789' }, idempotencyKey),
-    { code: 'PAYMENT_LINK_TARGET_DEFERRED', statusCode: 409 },
-  )
-  assert.equal(providerCalls, 0)
+  const first = await service.refreshAttempt(token, attemptId)
+  assert.equal(first.status, 'UNKNOWN')
+  const second = await service.refreshAttempt(token, attemptId)
+  assert.equal(second.status, 'FAILED')
+  assert.equal(releases, 2)
+  assert.deepEqual(calls[0], calls[1])
 })
 
-test('refreshAttempt refuses to post a legacy A/R attempt or contact the provider', async () => {
-  let providerCalls = 0
-  let financeCalls = 0
+test('verified A/R collection posts the signed target and reservation identity to ITC', async () => {
   const attempt = {
-    ...baseAttempt, state: 'VERIFIED_PENDING_LEDGER', payment_link_id: '40000000-0000-4000-8000-000000000001',
-    collection_target_type: 'AR_SETTLEMENT', customer_id: '50000000-0000-4000-8000-000000000001',
-    receivable_id: '60000000-0000-4000-8000-000000000001',
+    ...baseAttempt, state: 'VERIFIED_PENDING_LEDGER', payment_link_id: baseLink.payment_link_id,
+    created_by_customer_id: '60000000-0000-4000-8000-000000000001', collection_target_type: 'AR_SETTLEMENT',
+    customer_id: '50000000-0000-4000-8000-000000000001', receivable_id: '60000000-0000-4000-8000-000000000002',
+    receivable_reservation_id: attemptId, receivable_reservation_state: 'ACTIVE',
+    verified_at: '2026-10-15T12:00:00.000Z', provider_evidence_digest: 'a'.repeat(64),
   }
+  let applied
   const service = createPublicPaymentService({
-    repository: { getPublicAttempt: async () => attempt },
-    itcFinanceClient: { applyCustomerReceivablePayment: async () => { financeCalls++ } },
-    providerRegistry: { get: () => ({ getDepositStatus: async () => { providerCalls++ } }) },
+    repository: { getPublicAttempt: async () => attempt, markAttemptSucceeded: async (_id, operationId) => ({ ...attempt, state: 'SUCCEEDED', ledger_operation_id: operationId }) },
+    itcFinanceClient: { applyCustomerReceivablePayment: async (payload) => { applied = payload; return { operation: { operation_id: '30000000-0000-4000-8000-000000000001' } } } },
+    providerRegistry: {},
   })
-  await assert.rejects(service.refreshAttempt(token, attemptId), { code: 'PAYMENT_LINK_TARGET_DEFERRED', statusCode: 409 })
-  assert.equal(providerCalls, 0)
-  assert.equal(financeCalls, 0)
+  const refreshed = await service.refreshAttempt(token, attemptId)
+  assert.equal(refreshed.status, 'SUCCEEDED')
+  assert.deepEqual(applied.target, { type: 'AR_SETTLEMENT', customer_id: attempt.customer_id, receivable_id: attempt.receivable_id, reservation_id: attemptId })
+  assert.equal(applied.amount, '125.00')
 })
 
 test('startAttempt rejects a network absent from provider capabilities before persistence', async () => {
