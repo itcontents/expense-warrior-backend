@@ -33,6 +33,23 @@ const MIGRATION_POSTCONDITIONS = Object.freeze({
     ],
   },
   '0016_payment_link_attempts_report_created_idx.sql': { relations: ['payment_link_attempts_report_created_idx'] },
+  '0017_payment_link_receivable_recovery.sql': {
+    relations: ['payment_link_receivable_closures', 'payment_link_receivable_closures_receivable_idx'],
+    triggers: [['payment_link_receivable_closures', 'payment_link_receivable_closures_append_only'], ['payment_link_receivable_closures', 'payment_link_receivable_closures_reject_truncate']],
+    columns: { payment_link_attempts: ['receivable_reservation_id', 'receivable_reservation_state'], payment_link_receivable_closures: ['payment_link_id', 'receivable_id', 'collection_operation_id', 'settled_at'] },
+    constraints: [
+      { name: 'payment_link_attempts_receivable_reservation_state_check', literals: ['PENDING', 'UNKNOWN', 'ACTIVE', 'RELEASED', 'APPLIED'], requiredTokens: ['receivable_reservation_state'] },
+      { name: 'payment_link_attempts_receivable_reservation_pair_check', requiredTokens: ['receivable_reservation_id', 'receivable_reservation_state'] },
+    ],
+    privileges: [
+      { table: 'payment_link_receivable_closures', role: 'expense_warrior_app', privilege: 'SELECT', granted: true },
+      { table: 'payment_link_receivable_closures', role: 'expense_warrior_app', privilege: 'INSERT', granted: true },
+      { table: 'payment_link_receivable_closures', role: 'expense_warrior_app', privilege: 'UPDATE', granted: false },
+      { table: 'payment_link_receivable_closures', role: 'expense_warrior_app', privilege: 'DELETE', granted: false },
+      { table: 'payment_link_receivable_closures', role: 'expense_warrior_app', privilege: 'TRUNCATE', granted: false },
+    ],
+    indexes: [{ name: 'payment_link_receivable_closures_receivable_idx', table: 'payment_link_receivable_closures', unique: false, keyDefinition: 'USING btree (receivable_id, settled_at DESC, payment_link_id)', predicateValues: [] }],
+  },
 })
 
 async function verifyMigrationPostconditions(client, migrations) {
@@ -44,6 +61,7 @@ async function verifyMigrationPostconditions(client, migrations) {
   const indexNames = new Set()
   const criticalIndexes = new Map()
   const constraintSpecs = new Map()
+  const privilegeChecks = new Map()
 
   for (const migration of migrations) {
     const spec = MIGRATION_POSTCONDITIONS[migration.name]
@@ -59,6 +77,9 @@ async function verifyMigrationPostconditions(client, migrations) {
       criticalIndexes.set(index.name, index)
     }
     for (const constraint of spec.constraints || []) constraintSpecs.set(constraint.name, constraint)
+    for (const privilege of spec.privileges || []) {
+      privilegeChecks.set(`${privilege.table}.${privilege.role}.${privilege.privilege}`, privilege)
+    }
     for (const [table, columns] of Object.entries(spec.columns || {})) {
       for (const column of columns) columnPairs.set(`${table}.${column}`, { table, column })
     }
@@ -142,6 +163,20 @@ async function verifyMigrationPostconditions(client, migrations) {
     for (const row of query.rows || []) foundConstraints.set(row.constraint_name, row)
   }
 
+  const foundPrivileges = new Map()
+  if (privilegeChecks.size) {
+    const privileges = [...privilegeChecks.values()]
+    const query = await client.query(`
+      SELECT required.table_name, required.role_name, required.privilege_type,
+             has_table_privilege(required.role_name,
+               format('%I.%I', current_schema(), required.table_name), required.privilege_type) AS is_granted
+      FROM unnest($1::text[], $2::text[], $3::text[]) AS required(table_name, role_name, privilege_type)
+    `, [privileges.map(({ table }) => table), privileges.map(({ role }) => role), privileges.map(({ privilege }) => privilege)])
+    for (const row of query.rows || []) {
+      foundPrivileges.set(`${row.table_name}.${row.role_name}.${row.privilege_type}`, row.is_granted)
+    }
+  }
+
   for (const migration of migrations) {
     const spec = MIGRATION_POSTCONDITIONS[migration.name]
     if (!spec) continue
@@ -152,6 +187,7 @@ async function verifyMigrationPostconditions(client, migrations) {
       ...(spec.relations || []).filter((name) => indexNames.has(name)).map((name) => isHealthyIndex(foundIndexes.get(name), criticalIndexes.get(name))),
       ...(spec.indexes || []).filter((index) => !(spec.relations || []).includes(index.name)).map((index) => isHealthyIndex(foundIndexes.get(index.name), index)),
       ...(spec.constraints || []).map((constraint) => isHealthyConstraint(foundConstraints.get(constraint.name), constraint)),
+      ...(spec.privileges || []).map((privilege) => foundPrivileges.get(`${privilege.table}.${privilege.role}.${privilege.privilege}`) === privilege.granted),
     ]
     const passed = checks.length > 0 && checks.every(Boolean)
     const presentCount = checks.filter(Boolean).length
@@ -170,7 +206,11 @@ function isHealthyIndex(row, spec) {
   if (!spec) return true
   if (row.table_name !== spec.table || row.is_unique !== spec.unique) return false
   if (spec.keyDefinition && !String(row.index_definition || '').includes(spec.keyDefinition)) return false
-  return predicateValues(row.predicate)?.join('\u0000') === [...spec.predicateValues].sort().join('\u0000')
+  const actualPredicate = predicateValues(row.predicate)
+  const expectedPredicate = [...(spec.predicateValues || [])].sort()
+  return expectedPredicate.length === 0
+    ? actualPredicate === null
+    : actualPredicate?.join('\u0000') === expectedPredicate.join('\u0000')
 }
 
 function predicateValues(predicate) {

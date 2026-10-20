@@ -6,9 +6,13 @@ const { MIGRATION_POSTCONDITIONS, verifyMigrationPostconditions } = require('../
 const target = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator', schema: 'public', searchPath: 'public, pg_temp' }
 
 function constraintDefinition(name) {
-  const spec = MIGRATION_POSTCONDITIONS['0015_staff_payout_retries.sql'].constraints.find((constraint) => constraint.name === name)
+  const spec = Object.values(MIGRATION_POSTCONDITIONS).flatMap((migration) => migration.constraints || []).find((constraint) => constraint.name === name)
   return [...(spec.requiredTokens || []), ...(spec.literals || []).map((literal) => `'${literal}'`),
     ...(spec.minimum === undefined ? [] : [`>= ${spec.minimum}`, `<= ${spec.maximum}`])].join(' ')
+}
+
+function indexSpecification(name) {
+  return Object.values(MIGRATION_POSTCONDITIONS).flatMap((migration) => migration.indexes || []).find((index) => index.name === name)
 }
 
 function createPostconditionClient(fault = {}) {
@@ -24,12 +28,14 @@ function createPostconditionClient(fault = {}) {
         index_name,
         index_valid: index_name !== fault.invalidIndex,
         index_ready: true,
-        is_unique: index_name === 'request_payout_attempts_one_active_idx',
-        table_name: 'request_payout_attempts',
+        is_unique: Boolean(indexSpecification(index_name)?.unique),
+        table_name: indexSpecification(index_name)?.table || 'request_payout_attempts',
         index_definition: fault.wrongIndexKey && index_name === 'request_payout_attempts_one_active_idx'
           ? 'CREATE UNIQUE INDEX request_payout_attempts_one_active_idx ON public.request_payout_attempts USING btree (payout_id)'
-          : 'CREATE UNIQUE INDEX request_payout_attempts_one_active_idx ON public.request_payout_attempts USING btree (request_id)',
-        predicate: fault.wrongPredicate && index_name === 'request_payout_attempts_one_active_idx'
+          : indexSpecification(index_name)
+            ? `CREATE ${indexSpecification(index_name).unique ? 'UNIQUE ' : ''}INDEX ${index_name} ON public.${indexSpecification(index_name).table} ${indexSpecification(index_name).keyDefinition}`
+            : 'CREATE UNIQUE INDEX request_payout_attempts_one_active_idx ON public.request_payout_attempts USING btree (request_id)',
+        predicate: !indexSpecification(index_name)?.predicateValues?.length ? null : fault.wrongPredicate && index_name === 'request_payout_attempts_one_active_idx'
           ? "state = 'PENDING'::text"
           : "state = ANY (ARRAY['RESERVING'::text, 'SUBMITTING'::text, 'PENDING'::text, 'UNKNOWN'::text, 'VERIFICATION_REQUIRED'::text, 'FAILED_PENDING_RELEASE'::text])",
       })) }
@@ -37,6 +43,12 @@ function createPostconditionClient(fault = {}) {
         constraint_name, constraint_type: 'c',
         is_validated: constraint_name !== fault.unvalidatedConstraint,
         definition: constraintDefinition(constraint_name),
+      })) }
+      if (/has_table_privilege/i.test(sql)) return { rows: params[0].map((table_name, index) => ({
+        table_name, role_name: params[1][index], privilege_type: params[2][index],
+        is_granted: `${table_name}.${params[1][index]}.${params[2][index]}` === fault.wrongPrivilege
+          ? !['SELECT', 'INSERT'].includes(params[2][index])
+          : ['SELECT', 'INSERT'].includes(params[2][index]),
       })) }
       return { rows: [] }
     },
@@ -59,13 +71,21 @@ test('postcondition verification uses catalog SELECTs and returns one result per
       if (/pg_catalog\.pg_trigger/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, trigger_name: params[1][index], enabled_mode: 'O' })) }
       if (/pg_catalog\.pg_index/i.test(sql)) return { rows: params[0].map((index_name) => ({
         index_name, index_valid: true, index_ready: true,
-        is_unique: index_name === 'request_payout_attempts_one_active_idx',
-        table_name: 'request_payout_attempts',
-        index_definition: 'CREATE UNIQUE INDEX request_payout_attempts_one_active_idx ON public.request_payout_attempts USING btree (request_id)',
-        predicate: "state = ANY (ARRAY['RESERVING'::text, 'SUBMITTING'::text, 'PENDING'::text, 'UNKNOWN'::text, 'VERIFICATION_REQUIRED'::text, 'FAILED_PENDING_RELEASE'::text])",
+        is_unique: Boolean(indexSpecification(index_name)?.unique),
+        table_name: indexSpecification(index_name)?.table || 'request_payout_attempts',
+        index_definition: indexSpecification(index_name)
+          ? `CREATE ${indexSpecification(index_name).unique ? 'UNIQUE ' : ''}INDEX ${index_name} ON public.${indexSpecification(index_name).table} ${indexSpecification(index_name).keyDefinition}`
+          : 'CREATE UNIQUE INDEX request_payout_attempts_one_active_idx ON public.request_payout_attempts USING btree (request_id)',
+        predicate: indexSpecification(index_name)?.predicateValues?.length
+          ? "state = ANY (ARRAY['RESERVING'::text, 'SUBMITTING'::text, 'PENDING'::text, 'UNKNOWN'::text, 'VERIFICATION_REQUIRED'::text, 'FAILED_PENDING_RELEASE'::text])"
+          : null,
       })) }
       if (/pg_catalog\.pg_constraint/i.test(sql)) return { rows: params[0].map((constraint_name) => ({
         constraint_name, constraint_type: 'c', is_validated: true, definition: constraintDefinition(constraint_name),
+      })) }
+      if (/has_table_privilege/i.test(sql)) return { rows: params[0].map((table_name, index) => ({
+        table_name, role_name: params[1][index], privilege_type: params[2][index],
+        is_granted: ['SELECT', 'INSERT'].includes(params[2][index]),
       })) }
       return { rows: [] }
     },
@@ -77,6 +97,7 @@ test('postcondition verification uses catalog SELECTs and returns one result per
   assert.ok(statements.every((statement) => /^SELECT\b/i.test(statement)))
   assert.ok(statements.some((statement) => /pg_catalog\.pg_index/.test(statement)))
   assert.ok(statements.some((statement) => /pg_catalog\.pg_constraint/.test(statement)))
+  assert.ok(statements.some((statement) => /has_table_privilege/.test(statement)))
 })
 
 test('postcondition verification rejects invalid indexes and an incorrect active-attempt predicate', async () => {
@@ -115,6 +136,21 @@ test('postcondition verification rejects disabled triggers and unvalidated retry
   }
 })
 
+test('postcondition verification rejects missing runtime grants or excessive closure-table privileges', async () => {
+  const migrations = await collectMigrations()
+  for (const wrongPrivilege of [
+    'payment_link_receivable_closures.expense_warrior_app.SELECT',
+    'payment_link_receivable_closures.expense_warrior_app.INSERT',
+    'payment_link_receivable_closures.expense_warrior_app.UPDATE',
+    'payment_link_receivable_closures.expense_warrior_app.DELETE',
+    'payment_link_receivable_closures.expense_warrior_app.TRUNCATE',
+  ]) {
+    const result = await verifyMigrationPostconditions(createPostconditionClient({ wrongPrivilege }), migrations)
+    const paymentLinkMigration = result.verified.find(({ migration }) => migration === '0017_payment_link_receivable_recovery.sql')
+    assert.equal(paymentLinkMigration.passed, false, wrongPrivilege)
+  }
+})
+
 test('postcondition verification checks the active-attempt unique key, not only its partial predicate', async () => {
   const migrations = await collectMigrations()
   const result = await verifyMigrationPostconditions(createPostconditionClient({ wrongIndexKey: true }), migrations)
@@ -149,12 +185,21 @@ function createVerificationPool(migrations, { missingRelation = null, ledgerRows
       if (/pg_catalog\.pg_trigger/i.test(statement)) return { rows: params[0].map((table_name, index) => ({ table_name, trigger_name: params[1][index], enabled_mode: 'O' })) }
       if (/pg_catalog\.pg_index/i.test(statement)) return { rows: params[0].map((index_name) => ({
         index_name, index_valid: true, index_ready: true,
-        is_unique: index_name === 'request_payout_attempts_one_active_idx', table_name: 'request_payout_attempts',
-        index_definition: 'CREATE UNIQUE INDEX request_payout_attempts_one_active_idx ON public.request_payout_attempts USING btree (request_id)',
-        predicate: "state = ANY (ARRAY['RESERVING'::text, 'SUBMITTING'::text, 'PENDING'::text, 'UNKNOWN'::text, 'VERIFICATION_REQUIRED'::text, 'FAILED_PENDING_RELEASE'::text])",
+        is_unique: Boolean(indexSpecification(index_name)?.unique),
+        table_name: indexSpecification(index_name)?.table || 'request_payout_attempts',
+        index_definition: indexSpecification(index_name)
+          ? `CREATE ${indexSpecification(index_name).unique ? 'UNIQUE ' : ''}INDEX ${index_name} ON public.${indexSpecification(index_name).table} ${indexSpecification(index_name).keyDefinition}`
+          : 'CREATE UNIQUE INDEX request_payout_attempts_one_active_idx ON public.request_payout_attempts USING btree (request_id)',
+        predicate: indexSpecification(index_name)?.predicateValues?.length
+          ? "state = ANY (ARRAY['RESERVING'::text, 'SUBMITTING'::text, 'PENDING'::text, 'UNKNOWN'::text, 'VERIFICATION_REQUIRED'::text, 'FAILED_PENDING_RELEASE'::text])"
+          : null,
       })) }
       if (/pg_catalog\.pg_constraint/i.test(statement)) return { rows: params[0].map((constraint_name) => ({
         constraint_name, constraint_type: 'c', is_validated: true, definition: constraintDefinition(constraint_name),
+      })) }
+      if (/has_table_privilege/i.test(statement)) return { rows: params[0].map((table_name, index) => ({
+        table_name, role_name: params[1][index], privilege_type: params[2][index],
+        is_granted: ['SELECT', 'INSERT'].includes(params[2][index]),
       })) }
       return { rows: [] }
     },
