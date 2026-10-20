@@ -187,6 +187,7 @@ test('migration target config requires a named allowlisted target and complete e
     DB_MIGRATION_TARGET_DATABASE: 'expense_warrior',
     DB_USER: 'expense_warrior_app',
     DB_MIGRATION_USER: 'expense_warrior_migrator',
+    DB_MIGRATION_PASSWORD: 'migration-test-password',
   }
   assert.deepEqual(loadMigrationTargetConfig(values), {
     name: 'local', host: '127.0.0.1', port: 5432,
@@ -195,6 +196,8 @@ test('migration target config requires a named allowlisted target and complete e
 
   assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET: '' }),
     (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID')
+  assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_PASSWORD: '' }),
+    (error) => error.code === 'MIGRATION_TARGET_CONFIG_INVALID' && error.details.includes('DB_MIGRATION_PASSWORD'))
   assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET: 'production' }),
     (error) => error.code === 'MIGRATION_TARGET_NOT_ALLOWLISTED')
   assert.throws(() => loadMigrationTargetConfig({ ...values, DB_MIGRATION_TARGET_HOST: '' }),

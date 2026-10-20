@@ -37,6 +37,7 @@ test('migration status reports missing configuration names without connecting or
       'DB_MIGRATION_TARGET_PORT',
       'DB_MIGRATION_TARGET_DATABASE',
       'DB_MIGRATION_USER',
+      'DB_MIGRATION_PASSWORD',
     ])
     assert.doesNotMatch(result.stderr, /unit-test-secret-placeholder/)
   } finally {

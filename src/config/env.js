@@ -220,6 +220,7 @@ function loadMigrationTargetConfig(source = process.env) {
     DB_MIGRATION_TARGET_PORT: Joi.number().integer().min(1).max(65535).required(),
     DB_MIGRATION_TARGET_DATABASE: Joi.string().trim().min(1).required(),
     DB_MIGRATION_USER: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_PASSWORD: Joi.string().min(1).required(),
   }).unknown(true)
   const { value, error } = schema.validate(source, { abortEarly: false, convert: true })
   if (error) {
