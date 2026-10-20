@@ -1,5 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const { spawnSync } = require('node:child_process')
 const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
@@ -7,6 +8,41 @@ const path = require('node:path')
 const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, inspectMigrations, planMigrations, runMigrations, verifyMigrations } = require('../src/db/migrate')
 
 const migrationTarget = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator', schema: 'public', searchPath: 'public, pg_temp' }
+
+test('migration status reports missing configuration names without connecting or exposing values', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'expense-migration-config-'))
+  try {
+    await fs.writeFile(path.join(directory, '.env'), [
+      'DB_HOST=127.0.0.1',
+      'DB_NAME=expense_warrior',
+      'DB_USER=expense_warrior_app',
+      'DB_PASSWORD=unit-test-secret-placeholder',
+      'ITC_API_BASE_URL=http://127.0.0.1:3000/api/v1',
+    ].join('\n'))
+    await fs.writeFile(path.join(directory, '.env.migrations'), '')
+    const result = spawnSync(process.execPath, [path.join(__dirname, '../src/db/migrate.js'), 'status'], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH || '', NODE_ENV: 'test' },
+    })
+
+    assert.equal(result.status, 1)
+    const failure = JSON.parse(result.stderr.trim())
+    assert.equal(failure.event, 'migration_failed')
+    assert.equal(failure.code, 'MIGRATION_TARGET_CONFIG_INVALID')
+    assert.deepEqual(failure.details, [
+      'DB_MIGRATION_TARGET',
+      'DB_MIGRATION_ALLOWED_TARGETS',
+      'DB_MIGRATION_TARGET_HOST',
+      'DB_MIGRATION_TARGET_PORT',
+      'DB_MIGRATION_TARGET_DATABASE',
+      'DB_MIGRATION_USER',
+    ])
+    assert.doesNotMatch(result.stderr, /unit-test-secret-placeholder/)
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true })
+  }
+})
 
 async function createMigrationFixture(files = { '0001_first.sql': 'SELECT 1;', '0002_second.sql': 'SELECT 2;' }) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'expense-migration-inspect-'))

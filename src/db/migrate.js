@@ -6,6 +6,27 @@ const { MIGRATION_POSTCONDITIONS, verifyMigrationPostconditions } = require('./m
 
 const MIGRATION_CONFIRMATION = 'APPLY'
 const ADVISORY_LOCK_ID = 455752
+const MIGRATION_CONFIG_DETAIL_KEYS = new Set([
+  'DB_MIGRATION_TARGET',
+  'DB_MIGRATION_ALLOWED_TARGETS',
+  'DB_MIGRATION_TARGETS_JSON',
+  'DB_MIGRATION_TARGET_HOST',
+  'DB_MIGRATION_TARGET_PORT',
+  'DB_MIGRATION_TARGET_DATABASE',
+  'DB_MIGRATION_USER',
+  'DB_MIGRATION_PASSWORD',
+])
+
+function serializeMigrationFailure(error) {
+  const details = Array.isArray(error?.details)
+    ? [...new Set(error.details.filter((detail) => MIGRATION_CONFIG_DETAIL_KEYS.has(detail)))]
+    : []
+  return {
+    event: 'migration_failed',
+    code: error?.code || 'MIGRATION_FAILED',
+    ...(details.length ? { details } : {}),
+  }
+}
 
 function assertMigrationAllowed(env = process.env) {
   if (env.CONFIRM_EXPENSE_WARRIOR_MIGRATIONS !== MIGRATION_CONFIRMATION) {
@@ -377,14 +398,14 @@ if (require.main === module) {
         if (result.state === 'BLOCKED' || result.state === 'MANUAL_REVIEW_REQUIRED' || result.verified === false) process.exitCode = 1
       })
       .catch((error) => {
-        console.error(JSON.stringify({ event: 'migration_failed', code: error.code || 'MIGRATION_FAILED' }))
+        console.error(JSON.stringify(serializeMigrationFailure(error)))
         process.exitCode = 1
       })
       .finally(() => pool?.end())
   } catch (error) {
-    console.error(JSON.stringify({ event: 'migration_failed', code: error.code || 'MIGRATION_FAILED' }))
+    console.error(JSON.stringify(serializeMigrationFailure(error)))
     process.exitCode = 1
   }
 }
 
-module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations, verifyMigrations }
+module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations }
