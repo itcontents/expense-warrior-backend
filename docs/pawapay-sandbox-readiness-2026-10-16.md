@@ -30,3 +30,7 @@ The signed wallet-balance request succeeded and returned one record for `ZMB` / 
 ## Remaining checks
 
 These reads do not verify payout configuration, settlement, provider status/recovery behavior, signed-request enforcement at the account, or live phone prompt UX. The official sandbox guide says the real PIN/authorization prompt is not shown in sandbox; do not represent sandbox status testing as proof of that user experience. Keep payment initiation flags disabled until the ITC migration/accounting gates and all merchant-account checks are complete. Any sandbox transaction test requires its own explicit authorization and must use the documented sandbox test MSISDNs.
+
+## Current local configuration gate — 21 October 2026
+
+A secret-safe check of the current Expense Warrior `.env` confirms the API token and request-signing configuration are present, but the mapped PawaPay provider account ID and version are missing. ITC service-client ID/secret and the payout-destination encryption keyring are also missing. Collection and payout initiation flags are both false. The local `PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED=true` value is only a configuration assertion; it does not prove that PawaPay enforces signed-only requests for the merchant account. No new provider request was sent during this recheck. Configure and verify the exact merchant account identity and ITC integration before attempting even a sandbox deposit or payout flow.
