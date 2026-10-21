@@ -16,15 +16,42 @@ const MIGRATION_CONFIG_DETAIL_KEYS = new Set([
   'DB_MIGRATION_USER',
   'DB_MIGRATION_PASSWORD',
 ])
+const MIGRATION_IDENTITY_CHECK_KEYS = new Set([
+  'connection_host',
+  'connection_port',
+  'connection_database',
+  'connection_user',
+  'target_schema',
+  'target_search_path',
+  'server_identity_unavailable',
+  'database',
+  'current_role',
+  'session_role',
+  'schema',
+  'search_path',
+  'primary_database',
+  'role_superuser',
+  'role_createdb',
+  'role_createrole',
+  'role_replication',
+  'role_bypassrls',
+])
+const MIGRATION_STAGE_LABELS = new Set(['schema_inventory', 'migration_ledger_read'])
 
 function serializeMigrationFailure(error) {
   const details = Array.isArray(error?.details)
     ? [...new Set(error.details.filter((detail) => MIGRATION_CONFIG_DETAIL_KEYS.has(detail)))]
     : []
+  const identityChecks = Array.isArray(error?.identityChecks)
+    ? [...new Set(error.identityChecks.filter((check) => MIGRATION_IDENTITY_CHECK_KEYS.has(check)))]
+    : []
+  const stage = MIGRATION_STAGE_LABELS.has(error?.migrationStage) ? error.migrationStage : null
   return {
     event: 'migration_failed',
     code: error?.code || 'MIGRATION_FAILED',
     ...(details.length ? { details } : {}),
+    ...(identityChecks.length ? { identityChecks } : {}),
+    ...(stage ? { stage } : {}),
   }
 }
 
@@ -45,6 +72,10 @@ function getMigrationDatabaseConfig(config) {
   return config.migrationDatabase
 }
 
+function normalizeSearchPath(searchPath) {
+  return String(searchPath || '').split(',').map((schema) => schema.trim()).join(',')
+}
+
 async function assertMigrationTargetIdentity(client, target) {
   if (!client || !target) {
     const error = new Error('A connected client and named migration target are required')
@@ -57,7 +88,15 @@ async function assertMigrationTargetIdentity(client, target) {
     String(parameters.database || '') === target.database &&
     String(parameters.user || '') === target.user
   const targetSchemaMatches = target.schema === 'public' && target.searchPath === 'public, pg_temp'
+  const identityChecks = []
+  if (String(parameters.host || '') !== target.host) identityChecks.push('connection_host')
+  if (Number(parameters.port) !== target.port) identityChecks.push('connection_port')
+  if (String(parameters.database || '') !== target.database) identityChecks.push('connection_database')
+  if (String(parameters.user || '') !== target.user) identityChecks.push('connection_user')
+  if (target.schema !== 'public') identityChecks.push('target_schema')
+  if (target.searchPath !== 'public, pg_temp') identityChecks.push('target_search_path')
   let serverMatches = false
+  let identity
   try {
     const result = await client.query(`
       SELECT current_database() AS database,
@@ -74,13 +113,27 @@ async function assertMigrationTargetIdentity(client, target) {
       FROM pg_catalog.pg_roles target_role
       WHERE target_role.rolname = current_user
     `)
-    const identity = result.rows?.[0]
+    identity = result.rows?.[0]
+    if (!identity) identityChecks.push('server_identity_unavailable')
+    else {
+      if (identity.database !== target.database) identityChecks.push('database')
+      if (identity.current_role_name !== target.user) identityChecks.push('current_role')
+      if (identity.session_role_name !== target.user) identityChecks.push('session_role')
+      if (identity.schema_name !== target.schema) identityChecks.push('schema')
+      if (normalizeSearchPath(identity.search_path) !== normalizeSearchPath(target.searchPath)) identityChecks.push('search_path')
+      if (identity.is_in_recovery !== false) identityChecks.push('primary_database')
+      if (identity.is_superuser !== false) identityChecks.push('role_superuser')
+      if (identity.can_create_database !== false) identityChecks.push('role_createdb')
+      if (identity.can_create_role !== false) identityChecks.push('role_createrole')
+      if (identity.can_replicate !== false) identityChecks.push('role_replication')
+      if (identity.bypasses_row_security !== false) identityChecks.push('role_bypassrls')
+    }
     serverMatches = Boolean(identity) &&
       identity.database === target.database &&
       identity.current_role_name === target.user &&
       identity.session_role_name === target.user &&
       identity.schema_name === target.schema &&
-      identity.search_path === target.searchPath &&
+      normalizeSearchPath(identity.search_path) === normalizeSearchPath(target.searchPath) &&
       identity.is_in_recovery === false &&
       identity.is_superuser === false &&
       identity.can_create_database === false &&
@@ -89,10 +142,12 @@ async function assertMigrationTargetIdentity(client, target) {
       identity.bypasses_row_security === false
   } catch {
     serverMatches = false
+    identityChecks.push('server_identity_unavailable')
   }
   if (!connectionMatches || !targetSchemaMatches || !serverMatches) {
     const error = new Error('Connected database identity does not match the selected migration target')
     error.code = 'MIGRATION_TARGET_IDENTITY_MISMATCH'
+    error.identityChecks = [...new Set(identityChecks)]
     throw error
   }
 }
@@ -145,7 +200,9 @@ async function inspectMigrationClient(client, target, migrations) {
     await client.query('BEGIN READ ONLY')
     transactionStarted = true
     await assertMigrationTargetIdentity(client, target)
-    const schema = await client.query(`
+    let schema
+    try {
+      schema = await client.query(`
       WITH user_namespaces AS (
         SELECT oid
         FROM pg_catalog.pg_namespace
@@ -191,12 +248,22 @@ async function inspectMigrationClient(client, target, migrations) {
       )
       SELECT to_regclass('public.expense_warrior_schema_migrations') IS NOT NULL AS ledger_exists,
              (SELECT count(*)::int FROM user_objects) AS application_object_count
-    `)
+      `)
+    } catch (error) {
+      error.migrationStage = 'schema_inventory'
+      throw error
+    }
     const schemaState = schema.rows?.[0] || { ledger_exists: false, application_object_count: 0 }
     const migrationByName = new Map(migrations.map((migration) => [migration.name, migration]))
-    const ledgerRows = schemaState.ledger_exists
-      ? (await client.query('SELECT migration_name, checksum FROM expense_warrior_schema_migrations ORDER BY migration_name')).rows || []
-      : []
+    let ledgerRows = []
+    if (schemaState.ledger_exists) {
+      try {
+        ledgerRows = (await client.query('SELECT migration_name, checksum FROM expense_warrior_schema_migrations ORDER BY migration_name')).rows || []
+      } catch (error) {
+        error.migrationStage = 'migration_ledger_read'
+        throw error
+      }
+    }
     const blockers = []
     const rowsByName = new Map()
     for (const row of ledgerRows) {

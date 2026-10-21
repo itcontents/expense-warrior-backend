@@ -18,6 +18,8 @@ When more than one name is allowlisted, also set `DB_MIGRATION_TARGETS_JSON` to 
 
 The migration connection pins its session search path to `public, pg_temp`: unqualified migration objects go into `public`, and temporary objects cannot shadow them. Preflight inventories application objects across user schemas, including empty custom schemas, tables, partitions, views, materialized views, foreign tables, sequences, indexes, functions, and user-defined types. It blocks a database with existing objects but no migration ledger. The migration role must not be a superuser or have `CREATEDB`, `CREATEROLE`, replication, or `BYPASSRLS` privileges. It needs catalog and ledger reads for preflight and only the DDL privileges required by Expense Warrior migrations on this database. Keep it out of the API process and do not commit `.env.migrations`.
 
+If an existing migration ledger is owned by another role, the database owner must grant `SELECT` on only `public.expense_warrior_schema_migrations` to `expense_warrior_migrator` before `status`, `plan`, and `verify` can inspect it. Do not grant read access to every application table. Review the ledger and object ownership before applying migrations; the migration role must have only the ledger-write and DDL rights needed for the reviewed pending migrations.
+
 ## Review and apply
 
 Run commands from the backend repository root:

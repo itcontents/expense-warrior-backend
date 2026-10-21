@@ -5,9 +5,21 @@ const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 
-const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, inspectMigrations, planMigrations, runMigrations, verifyMigrations } = require('../src/db/migrate')
+const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations } = require('../src/db/migrate')
 
 const migrationTarget = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator', schema: 'public', searchPath: 'public, pg_temp' }
+
+test('migration failure serialization reports only an allowlisted database operation label', () => {
+  assert.deepEqual(serializeMigrationFailure({ code: '42501', migrationStage: 'migration_ledger_read', message: 'sensitive SQL and value' }), {
+    event: 'migration_failed',
+    code: '42501',
+    stage: 'migration_ledger_read',
+  })
+  assert.deepEqual(serializeMigrationFailure({ code: '42501', migrationStage: 'unknown', message: 'sensitive SQL and value' }), {
+    event: 'migration_failed',
+    code: '42501',
+  })
+})
 
 test('migration status reports missing configuration names without connecting or exposing values', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'expense-migration-config-'))
@@ -154,13 +166,33 @@ test('assertMigrationTargetIdentity verifies connection and server identity and 
     },
   }
   await assert.doesNotReject(assertMigrationTargetIdentity(client, target))
+  await assert.doesNotReject(assertMigrationTargetIdentity({
+    ...client,
+    async query() {
+      return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: target.schema, search_path: 'public,pg_temp', is_in_recovery: false, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] }
+    },
+  }, target))
 
   await assert.rejects(assertMigrationTargetIdentity({
     ...client, connectionParameters: { ...client.connectionParameters, database: 'itc' },
-  }, target), (error) => error.code === 'MIGRATION_TARGET_IDENTITY_MISMATCH')
+  }, target), (error) => {
+    assert.equal(error.code, 'MIGRATION_TARGET_IDENTITY_MISMATCH')
+    assert.deepEqual(error.identityChecks, ['connection_database'])
+    assert.deepEqual(serializeMigrationFailure(error), {
+      event: 'migration_failed',
+      code: 'MIGRATION_TARGET_IDENTITY_MISMATCH',
+      identityChecks: ['connection_database'],
+    })
+    assert.doesNotMatch(JSON.stringify(serializeMigrationFailure(error)), /expense_warrior_migrator|127\.0\.0\.1/)
+    return true
+  })
   await assert.rejects(assertMigrationTargetIdentity({
     ...client, async query() { return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: target.schema, search_path: target.searchPath, is_in_recovery: true, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] } },
-  }, target), (error) => error.code === 'MIGRATION_TARGET_IDENTITY_MISMATCH')
+  }, target), (error) => {
+    assert.equal(error.code, 'MIGRATION_TARGET_IDENTITY_MISMATCH')
+    assert.deepEqual(error.identityChecks, ['primary_database'])
+    return true
+  })
   await assert.rejects(assertMigrationTargetIdentity({
     ...client, async query() { return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: 'attacker_schema', search_path: 'attacker_schema, public', is_in_recovery: false, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] } },
   }, target), (error) => error.code === 'MIGRATION_TARGET_IDENTITY_MISMATCH')
