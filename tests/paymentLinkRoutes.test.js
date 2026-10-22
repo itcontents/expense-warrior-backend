@@ -41,7 +41,7 @@ test('payment-link management is admin-only and creates a fixed amount reusable 
   assert.deepEqual(calls[0].input.target, { type: 'REVENUE', revenue_account_code: '4000' })
 })
 
-test('A/R link creation is rejected before ITC lookup or persistence', async (t) => {
+test('A/R link creation verifies customer and full outstanding balance before persistence', async (t) => {
   const creates = []
   const lookups = []
   const app = express()
@@ -57,9 +57,15 @@ test('A/R link creation is rejected before ITC lookup or persistence', async (t)
     method: 'POST', headers: { cookie: 'itc_backoffice_access=admin', 'content-type': 'application/json', 'Idempotency-Key': 'c3d5fcb6-9424-41b8-9f8b-5f14bb8e3f66' },
     body: JSON.stringify({ amount: '250.00', description: 'Invoice', public_token: 'a'.repeat(64), target: { type: 'AR_SETTLEMENT', customer_id: '50000000-0000-4000-8000-000000000001', receivable_id: '50000000-0000-4000-8000-000000000002' } }),
   })
-  assert.equal(response.status, 400)
-  assert.deepEqual(lookups, [])
-  assert.equal(creates.length, 0)
+  assert.equal(response.status, 201)
+  assert.deepEqual(lookups, [['50000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000002', undefined]])
+  assert.equal(creates.length, 1)
+  const staleAmount = await fetch(`${url}/payment-links`, {
+    method: 'POST', headers: { cookie: 'itc_backoffice_access=admin', 'content-type': 'application/json', 'Idempotency-Key': 'c3d5fcb6-9424-41b8-9f8b-5f14bb8e3f67' },
+    body: JSON.stringify({ amount: '251.00', description: 'Invoice', public_token: 'b'.repeat(64), target: { type: 'AR_SETTLEMENT', customer_id: '50000000-0000-4000-8000-000000000001', receivable_id: '50000000-0000-4000-8000-000000000002' } }),
+  })
+  assert.equal(staleAmount.status, 422)
+  assert.equal(creates.length, 1)
 })
 
 test('payment-link management rejects invalid amount and unknown fields', async (t) => {
@@ -124,7 +130,7 @@ test('postable revenue account catalog is proxied to admins only', async (t) => 
   assert.equal(called, 1)
 })
 
-test('delivered receivable catalog endpoint is unavailable in the initial release', async (t) => {
+test('delivered receivable catalog is admin-only, bounded, and not cached', async (t) => {
   const calls = []
   const app = express()
   app.use(createPaymentLinkRouter({
@@ -135,12 +141,16 @@ test('delivered receivable catalog endpoint is unavailable in the initial releas
   const { server, url } = await listen(app)
   t.after(() => server.close())
   const path = '/payment-links/customers/50000000-0000-4000-8000-000000000001/receivables?limit=10'
+  const denied = await fetch(`${url}${path}`, { headers: { cookie: 'itc_backoffice_access=staff' } })
+  assert.equal(denied.status, 403)
   const response = await fetch(`${url}${path}`, { headers: { cookie: 'itc_backoffice_access=admin' } })
-  assert.equal(response.status, 404)
-  assert.equal(calls.length, 0)
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('cache-control'), 'private, no-store')
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0], ['50000000-0000-4000-8000-000000000001', { limit: 10, cursor: null }, undefined])
 })
 
-test('delivered receivable catalog endpoint does not call ITC for any customer', async (t) => {
+test('delivered receivable catalog rejects an invalid customer id before ITC lookup', async (t) => {
   let called = false
   const app = express()
   app.use(createPaymentLinkRouter({
@@ -151,9 +161,10 @@ test('delivered receivable catalog endpoint does not call ITC for any customer',
   const { server, url } = await listen(app)
   t.after(() => server.close())
 
-  const response = await fetch(`${url}/payment-links/customers/50000000-0000-4000-8000-000000000001/receivables`, {
+  const response = await fetch(`${url}/payment-links/customers/not-a-uuid/receivables`, {
     headers: { cookie: 'itc_backoffice_access=admin' },
   })
-  assert.equal(response.status, 404)
+  assert.equal(response.status, 400)
+  assert.deepEqual(await response.json(), { error: { code: 'INVALID_CUSTOMER_ID', message: 'Customer identifier is invalid' } })
   assert.equal(called, false)
 })

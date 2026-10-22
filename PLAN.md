@@ -4,14 +4,16 @@
 
 ## Current release snapshot — 2026-10-22
 
-The approved V1 scope remains staff expenses, reusable petty-cash collection links, PawaPay collections and approved payouts, wallet and reports, customer-credit collections, and full-balance payment of eligible delivered credit invoices. Current source does **not** meet that approved scope: Expense Warrior frontend `1e274a3` and backend `79f6d9c` remove invoice A/R links, while ITC `production` `8e0b3fd` rejects the signed `AR_SETTLEMENT` route. Preserve Shop.IT's separate initial-release A/R boundary and reconcile the Expense Warrior integration separately in the [shared handoff](../docs/itc-expense-warrior-shared-handoff.md).
+The approved V1 scope remains staff expenses, reusable petty-cash collection links, PawaPay collections and approved payouts, wallet and reports, customer-credit collections, and full-balance payment of eligible delivered credit invoices. The A/R route and UI have been restored as local source changes on the existing branches. ITC remains authoritative for receivables, holds, journals, and postings; Shop.IT's separately gated default commerce scope remains unchanged.
 
-- **Frontend:** `main` at `1e274a3`, equal to cached `origin/main`. `npm test` passed 69/69 and `npm run build` passed. The committed UI omits the approved delivered-invoice target. Authenticated live-workspace browser behavior remains unverified.
-- **Expense Warrior API:** A/R-deferral source change is commit `79f6d9c`; current `main` also contains the migration-status checker fix. Preserve untracked `tsconfig.json`. `npm test` passed 395, with 4 PostgreSQL-gated skips. Read-only migration status and plan ran against `expense_warrior` as `expense_warrior_migrator`: migrations 0001–0012 are recorded with matching checksums; 0013–0017 are pending; plan state is `READY` with no blockers. `npm run db:migrate:verify` reports `MIGRATIONS_PENDING`. No migration was applied. Postcondition tests pass 11/11 after fixing column visibility and missing-table privilege checks.
-- **ITC:** current checkout is on `production` at `8e0b3fd`; `npm run test:accounting-ar-deferral` passed 12/12 and confirms A/R finance routes are deferred. This is source evidence, not deployment or financial-readiness evidence.
-- **Financial configuration:** Expense Warrior `.env` keeps collections, payouts, and callback intake disabled; ITC service credentials and provider-account ID/version are absent. ITC `.env` keeps Expense Warrior finance disabled and has no Expense Warrior service-key map or Treasury account configured. The local PawaPay API token is present, but that does not prove the merchant account's signed-only setting. No provider call, deployment, or financial posting was performed.
+- **Frontend:** Existing `main` is one commit ahead of cached `origin/main`; the working tree restores the approved A/R collection target, invoice picker, and preview. `npm test` passed 69/69 and `npm run build` passed. Playwright checked the invoice picker at 390px and public payer preview at 320px with no horizontal overflow or console errors; these are fixture-only previews.
+- **Expense Warrior API:** Existing `main` is 52 commits ahead of cached `origin/main`; local changes restore A/R target validation, signed invoice reads, reservation-before-provider, recovery, verified ITC posting, settlement closure, and focused tests. Preserve untracked `tsconfig.json`. `npm test` passed 397 with 4 PostgreSQL-gated skips; focused A/R lifecycle tests passed 42/42. The read-only migration status connected as `expense_warrior_migrator`: 0001–0012 match source checksums, 0013–0017 are pending, with no blockers; `plan` is READY and `verify` correctly reports `MIGRATIONS_PENDING`. The approved session-local PostgreSQL suite passed 4/4, and its temporary tables were dropped when connections closed. No migration was applied.
+- **ITC:** Existing `production` branch is at `81cf4a1` with in-progress credit-quote conversion, dispatch A/R recognition, receivable, return/credit-note, and collection-refund source changes. Fresh read-only `local_staging` ledger checks show 134/135/140/142 adopted, 143 applied, and 145–149 applied. This does not establish the `itc`, online staging, or production database state.
+- **Financial configuration:** Expense Warrior collection, payout, and callback flags are false; ITC client credentials and provider-account ID/version are absent. ITC finance is false locally; its credit-invoice and collection-refund gates default off, and service-key/Treasury mapping values are absent. The local signed-only confirmation flag is not proof of the PawaPay merchant setting. No provider call, migration, deployment, or financial posting was performed.
 
-Next: align the current A/R route and UI with the already-approved V1 contract while preserving Shop.IT's separate initial-release deferral; review the source-only pending migrations against that final contract; then complete authenticated/browser and signed provider reconciliation checks. Keep database migrations unapplied and all financial flags disabled until the owner approves the exact target and operation and production gates are verified. Older dated sections below are historical evidence and do not override this snapshot. See the approved [A/R reactivation plan](docs/superpowers/plans/2026-10-20-credit-invoice-ar-reactivation.md).
+- **Current phone preview:** `http://192.168.10.58:5175/design-preview` is reachable on the current Wi-Fi address. At 320px, the public payer fixture showed Airtel, MTN, and Zamtel without horizontal overflow; the staff fixture showed the request form and approved categories/subcategories. At 390px, the admin fixture showed the delivered-invoice target and full-balance invoice picker. These screens are sample-only and make no API or financial calls. The Wi-Fi address is dynamic and may change.
+
+Next: finish the current source review and document the release handoff. Then obtain owner-directed, target-specific migration operations and verified environment credentials before any migration or finance/provider enablement. Authenticated API/browser behavior and provider reconciliation remain unverified. Preserve all current branches and unrelated worktree changes. See the approved [A/R reactivation plan](docs/superpowers/plans/2026-10-20-credit-invoice-ar-reactivation.md).
 
 ### Historical release snapshot — 2026-10-21 (superseded by the current release snapshot above)
 
@@ -191,23 +193,23 @@ Use only the published sandbox numbers for sandbox tests:
 | Airtel Zambia | `260973456019` | `PAYER_LIMIT_REACHED` |
 | Airtel Zambia | `260973456039` | `PAYMENT_NOT_APPROVED` |
 | Airtel Zambia | `260973456049` | `INSUFFICIENT_BALANCE` |
-| Airtel Zambia | `260973456069` | `UNSPECIFIED_FAILURE` |
-| Airtel Zambia | `260973456129` | `SUBMITTED` |
+| Airtel Zambia | `260973456069` | `OTHER_ERROR` |
+| Airtel Zambia | `260973456129` | `NO CALLBACK` (`SUBMITTED`) |
 | Airtel Zambia | `260973456789` | `COMPLETED` |
 | MTN Zambia | `260763456019` | `PAYER_LIMIT_REACHED` |
 | MTN Zambia | `260763456029` | `PAYER_NOT_FOUND` |
 | MTN Zambia | `260763456039` | `PAYMENT_NOT_APPROVED` |
-| MTN Zambia | `260763456069` | `UNSPECIFIED_FAILURE` |
-| MTN Zambia | `260763456129` | `SUBMITTED` |
+| MTN Zambia | `260763456069` | `OTHER_ERROR` |
+| MTN Zambia | `260763456129` | `NO CALLBACK` (`SUBMITTED`) |
 | MTN Zambia | `260763456789` | `COMPLETED` |
 | Zamtel Zambia | `260953456704` | `INSUFFICIENT_BALANCE` |
-| Zamtel Zambia | `260953456712` | `UNSPECIFIED_FAILURE` |
-| Zamtel Zambia | `260953456789` | `SUBMITTED` |
+| Zamtel Zambia | `260953456712` | `OTHER_ERROR` |
+| Zamtel Zambia | `260953456789` | `NO CALLBACK` (`SUBMITTED`) |
 | Zamtel Zambia | `260953456700` | `COMPLETED` |
 
 These are provider test fixtures, not real subscriber numbers. Keep them in sandbox-only test fixtures. Exercise successful and failed deposits and payouts, pending/recovery, duplicate callbacks, and idempotent retries. The admin balance integration uses the documented `GET /v2/wallet-balances?country=ZMB` endpoint with the sandbox token; verify account permission and returned wallet semantics before using its amount for payout eligibility.
 
-References: [sandbox setup](https://docs.pawapay.io/v2/docs/how_to_start), [sandbox test numbers](https://docs.pawapay.io/v2/docs/test_numbers), [wallet balances API](https://docs.pawapay.io/v2/api-reference/finances/wallet-balances), [deposit flow](https://docs.pawapay.io/v2/docs/deposits).
+Verified against the current [sandbox test numbers](https://docs.pawapay.io/v2/docs/test_numbers) and [testing guide](https://docs.pawapay.io/testing_the_api) on 2026-10-22. PawaPay states that sandbox phone numbers are sandbox-only and do not exercise the real authorization PIN prompt. Signed-only enforcement requires enabling the signing feature in the merchant dashboard; a local environment flag does not prove that account setting. See [signature requirements](https://docs.pawapay.io/v2/docs/signatures), [sandbox setup](https://docs.pawapay.io/v2/docs/how_to_start), [wallet balances API](https://docs.pawapay.io/v2/api-reference/finances/wallet-balances), and [deposit flow](https://docs.pawapay.io/v2/docs/deposits).
 
 ## Role and access policy
 

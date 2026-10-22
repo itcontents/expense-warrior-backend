@@ -15,6 +15,10 @@ function normalizeCollectionTarget(target) {
   if (target.type === 'REVENUE' && keys === 'revenue_account_code,type' && /^\d{4}$/.test(String(target.revenue_account_code || ''))) {
     return { type: target.type, revenueAccountCode: target.revenue_account_code }
   }
+  if (target.type === 'AR_SETTLEMENT' && keys === 'customer_id,receivable_id,type' &&
+      UUID.test(String(target.customer_id || '')) && UUID.test(String(target.receivable_id || ''))) {
+    return { type: target.type, customerId: target.customer_id.toLowerCase(), receivableId: target.receivable_id.toLowerCase() }
+  }
   if (target.type === 'CUSTOMER_CREDIT' && keys === 'customer_id,type' && UUID.test(String(target.customer_id || ''))) {
     return { type: target.type, customerId: target.customer_id.toLowerCase() }
   }
