@@ -173,7 +173,7 @@ async function verifyMigrationPostconditions(client, migrations) {
     const query = await client.query(`
       SELECT required.table_name, required.role_name, required.privilege_type,
              CASE
-               WHEN to_regclass(format('%I.%I', current_schema(), required.table_name)) IS NULL THEN false
+               WHEN to_regclass(format('%I.%I', current_schema(), required.table_name)) IS NULL THEN NULL
                ELSE has_table_privilege(required.role_name,
                  format('%I.%I', current_schema(), required.table_name), required.privilege_type)
              END AS is_granted

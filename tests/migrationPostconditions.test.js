@@ -18,8 +18,8 @@ function indexSpecification(name) {
 function createPostconditionClient(fault = {}) {
   return {
     async query(sql, params = []) {
-      if (/to_regclass/i.test(sql)) return { rows: params[0].map((relation_name) => ({ relation_name })) }
-      if (/information_schema\.columns/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, column_name: params[1][index] })) }
+      if (/FROM unnest\(\$1::text\[\]\) AS required\(relation_name\)/i.test(sql)) return { rows: params[0].filter((relation_name) => relation_name !== fault.missingRelation).map((relation_name) => ({ relation_name })) }
+      if (/pg_catalog\.pg_attribute/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, column_name: params[1][index] })) }
       if (/pg_catalog\.pg_trigger/i.test(sql)) return { rows: params[0].map((table_name, index) => ({
         table_name, trigger_name: params[1][index],
         enabled_mode: table_name === fault.disabledTrigger?.[0] && params[1][index] === fault.disabledTrigger?.[1] ? 'D' : 'O',
@@ -46,7 +46,9 @@ function createPostconditionClient(fault = {}) {
       })) }
       if (/has_table_privilege/i.test(sql)) return { rows: params[0].map((table_name, index) => ({
         table_name, role_name: params[1][index], privilege_type: params[2][index],
-        is_granted: `${table_name}.${params[1][index]}.${params[2][index]}` === fault.wrongPrivilege
+        is_granted: table_name === fault.missingRelation
+          ? (/THEN NULL/i.test(sql) ? null : false)
+          : `${table_name}.${params[1][index]}.${params[2][index]}` === fault.wrongPrivilege
           ? !['SELECT', 'INSERT'].includes(params[2][index])
           : ['SELECT', 'INSERT'].includes(params[2][index]),
       })) }
@@ -66,8 +68,8 @@ test('postcondition verification uses catalog SELECTs and returns one result per
   const client = {
     async query(sql, params = []) {
       statements.push(sql.trim())
-      if (/to_regclass/i.test(sql)) return { rows: params[0].map((relation_name) => ({ relation_name })) }
-      if (/information_schema\.columns/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, column_name: params[1][index] })) }
+      if (/FROM unnest\(\$1::text\[\]\) AS required\(relation_name\)/i.test(sql)) return { rows: params[0].map((relation_name) => ({ relation_name })) }
+      if (/pg_catalog\.pg_attribute/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, column_name: params[1][index] })) }
       if (/pg_catalog\.pg_trigger/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, trigger_name: params[1][index], enabled_mode: 'O' })) }
       if (/pg_catalog\.pg_index/i.test(sql)) return { rows: params[0].map((index_name) => ({
         index_name, index_valid: true, index_ready: true,
@@ -104,8 +106,8 @@ test('postcondition verification rejects invalid indexes and an incorrect active
   const migrations = await collectMigrations()
   const client = {
     async query(sql, params = []) {
-      if (/to_regclass/i.test(sql)) return { rows: params[0].map((relation_name) => ({ relation_name })) }
-      if (/information_schema\.columns/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, column_name: params[1][index] })) }
+      if (/FROM unnest\(\$1::text\[\]\) AS required\(relation_name\)/i.test(sql)) return { rows: params[0].map((relation_name) => ({ relation_name })) }
+      if (/pg_catalog\.pg_attribute/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, column_name: params[1][index] })) }
       if (/pg_catalog\.pg_trigger/i.test(sql)) return { rows: params[0].map((table_name, index) => ({ table_name, trigger_name: params[1][index], enabled_mode: 'O' })) }
       if (/pg_catalog\.pg_index/i.test(sql)) return { rows: params[0].map((index_name) => ({
         index_name, index_valid: index_name !== 'request_payout_attempts_latest_idx', index_ready: true,
@@ -151,6 +153,13 @@ test('postcondition verification rejects missing runtime grants or excessive clo
   }
 })
 
+test('postcondition verification does not treat an absent closure table as satisfying denied privileges', async () => {
+  const migrations = await collectMigrations()
+  const result = await verifyMigrationPostconditions(createPostconditionClient({ missingRelation: 'payment_link_receivable_closures' }), migrations)
+  const paymentLinkMigration = result.verified.find(({ migration }) => migration === '0017_payment_link_receivable_recovery.sql')
+  assert.equal(paymentLinkMigration.failedChecks.filter((check) => check.startsWith('privilege:payment_link_receivable_closures.')).length, 5)
+})
+
 test('postcondition verification checks the active-attempt unique key, not only its partial predicate', async () => {
   const migrations = await collectMigrations()
   const result = await verifyMigrationPostconditions(createPostconditionClient({ wrongIndexKey: true }), migrations)
@@ -180,8 +189,8 @@ function createVerificationPool(migrations, { missingRelation = null, ledgerRows
       if (/current_database\(\)/i.test(statement)) return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: target.schema, search_path: target.searchPath, is_in_recovery: false, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] }
       if (/AS ledger_exists/i.test(statement)) return { rows: [{ ledger_exists: true, application_object_count: 25 }] }
       if (/SELECT migration_name, checksum/i.test(statement)) return { rows: ledgerRows || migrations.map(({ name, checksum }) => ({ migration_name: name, checksum })) }
-      if (/to_regclass/i.test(statement)) return { rows: params[0].filter((name) => name !== missingRelation).map((relation_name) => ({ relation_name })) }
-      if (/information_schema\.columns/i.test(statement)) return { rows: params[0].map((table_name, index) => ({ table_name, column_name: params[1][index] })) }
+      if (/FROM unnest\(\$1::text\[\]\) AS required\(relation_name\)/i.test(statement)) return { rows: params[0].filter((name) => name !== missingRelation).map((relation_name) => ({ relation_name })) }
+      if (/pg_catalog\.pg_attribute/i.test(statement)) return { rows: params[0].map((table_name, index) => ({ table_name, column_name: params[1][index] })) }
       if (/pg_catalog\.pg_trigger/i.test(statement)) return { rows: params[0].map((table_name, index) => ({ table_name, trigger_name: params[1][index], enabled_mode: 'O' })) }
       if (/pg_catalog\.pg_index/i.test(statement)) return { rows: params[0].map((index_name) => ({
         index_name, index_valid: true, index_ready: true,
