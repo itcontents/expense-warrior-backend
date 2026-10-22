@@ -100,10 +100,14 @@ async function verifyMigrationPostconditions(client, migrations) {
   if (columnPairs.size) {
     const pairs = [...columnPairs.values()]
     const query = await client.query(`
-      SELECT table_name, column_name
-      FROM information_schema.columns
-      WHERE table_schema = current_schema()
-        AND (table_name, column_name) IN (
+      SELECT relation.relname AS table_name, attribute.attname AS column_name
+      FROM pg_catalog.pg_attribute attribute
+      JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+      JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = current_schema()
+        AND attribute.attnum > 0
+        AND NOT attribute.attisdropped
+        AND (relation.relname, attribute.attname) IN (
           SELECT table_name, column_name FROM unnest($1::text[], $2::text[]) AS required(table_name, column_name)
         )
     `, [pairs.map(({ table }) => table), pairs.map(({ column }) => column)])
@@ -168,8 +172,11 @@ async function verifyMigrationPostconditions(client, migrations) {
     const privileges = [...privilegeChecks.values()]
     const query = await client.query(`
       SELECT required.table_name, required.role_name, required.privilege_type,
-             has_table_privilege(required.role_name,
-               format('%I.%I', current_schema(), required.table_name), required.privilege_type) AS is_granted
+             CASE
+               WHEN to_regclass(format('%I.%I', current_schema(), required.table_name)) IS NULL THEN false
+               ELSE has_table_privilege(required.role_name,
+                 format('%I.%I', current_schema(), required.table_name), required.privilege_type)
+             END AS is_granted
       FROM unnest($1::text[], $2::text[], $3::text[]) AS required(table_name, role_name, privilege_type)
     `, [privileges.map(({ table }) => table), privileges.map(({ role }) => role), privileges.map(({ privilege }) => privilege)])
     for (const row of query.rows || []) {
@@ -181,17 +188,17 @@ async function verifyMigrationPostconditions(client, migrations) {
     const spec = MIGRATION_POSTCONDITIONS[migration.name]
     if (!spec) continue
     const checks = [
-      ...(spec.relations || []).map((name) => foundRelations.has(name)),
-      ...Object.entries(spec.columns || {}).flatMap(([table, columns]) => columns.map((column) => foundColumns.has(`${table}.${column}`))),
-      ...(spec.triggers || []).map(([table, name]) => ['O', 'A'].includes(foundTriggers.get(`${table}.${name}`))),
-      ...(spec.relations || []).filter((name) => indexNames.has(name)).map((name) => isHealthyIndex(foundIndexes.get(name), criticalIndexes.get(name))),
-      ...(spec.indexes || []).filter((index) => !(spec.relations || []).includes(index.name)).map((index) => isHealthyIndex(foundIndexes.get(index.name), index)),
-      ...(spec.constraints || []).map((constraint) => isHealthyConstraint(foundConstraints.get(constraint.name), constraint)),
-      ...(spec.privileges || []).map((privilege) => foundPrivileges.get(`${privilege.table}.${privilege.role}.${privilege.privilege}`) === privilege.granted),
+      ...(spec.relations || []).map((name) => ({ name: `relation:${name}`, passed: foundRelations.has(name) })),
+      ...Object.entries(spec.columns || {}).flatMap(([table, columns]) => columns.map((column) => ({ name: `column:${table}.${column}`, passed: foundColumns.has(`${table}.${column}`) }))),
+      ...(spec.triggers || []).map(([table, name]) => ({ name: `trigger:${table}.${name}`, passed: ['O', 'A'].includes(foundTriggers.get(`${table}.${name}`)) })),
+      ...(spec.relations || []).filter((name) => indexNames.has(name)).map((name) => ({ name: `index:${name}`, passed: isHealthyIndex(foundIndexes.get(name), criticalIndexes.get(name)) })),
+      ...(spec.indexes || []).filter((index) => !(spec.relations || []).includes(index.name)).map((index) => ({ name: `index:${index.name}`, passed: isHealthyIndex(foundIndexes.get(index.name), index) })),
+      ...(spec.constraints || []).map((constraint) => ({ name: `constraint:${constraint.name}`, passed: isHealthyConstraint(foundConstraints.get(constraint.name), constraint) })),
+      ...(spec.privileges || []).map((privilege) => ({ name: `privilege:${privilege.table}.${privilege.role}.${privilege.privilege}`, passed: foundPrivileges.get(`${privilege.table}.${privilege.role}.${privilege.privilege}`) === privilege.granted })),
     ]
-    const passed = checks.length > 0 && checks.every(Boolean)
-    const presentCount = checks.filter(Boolean).length
-    resultByName.set(migration.name, { passed, presentCount, totalCount: checks.length })
+    const passed = checks.length > 0 && checks.every(({ passed: checkPassed }) => checkPassed)
+    const presentCount = checks.filter(({ passed: checkPassed }) => checkPassed).length
+    resultByName.set(migration.name, { passed, presentCount, totalCount: checks.length, failedChecks: checks.filter(({ passed: checkPassed }) => !checkPassed).map(({ name }) => name) })
     if (!passed) blockers.push('POSTCONDITION_FAILED')
   }
 

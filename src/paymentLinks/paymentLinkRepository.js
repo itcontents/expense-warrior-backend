@@ -9,9 +9,6 @@ function createPaymentLinkRepository({ pool } = {}) {
                collection_target_type, revenue_account_code, customer_id, receivable_id
           FROM payment_links
          WHERE public_token_hash = $1 AND status = 'ACTIVE' AND collection_target_type <> 'UNCONFIGURED'
-           AND NOT (payment_links.collection_target_type = 'AR_SETTLEMENT' AND EXISTS (
-             SELECT 1 FROM payment_link_receivable_closures c WHERE c.receivable_id = payment_links.receivable_id
-           ))
          LIMIT 1
       `, [tokenHash])
       return result.rows[0] || null
@@ -43,13 +40,13 @@ function createPaymentLinkRepository({ pool } = {}) {
                  created_by_customer_id
             FROM payment_links
            WHERE public_token_hash = $1 AND status = 'ACTIVE' AND collection_target_type <> 'UNCONFIGURED'
-             AND NOT (payment_links.collection_target_type = 'AR_SETTLEMENT' AND EXISTS (
-               SELECT 1 FROM payment_link_receivable_closures c WHERE c.receivable_id = payment_links.receivable_id
-             ))
            FOR SHARE
         `, [input.tokenHash])
         const link = linkResult.rows[0]
         if (!link) throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
+        if (link.collection_target_type === 'AR_SETTLEMENT') {
+          throw new PaymentLinkError('COMMERCE_RECEIVABLES_DEFERRED', 410)
+        }
         const priorResult = await client.query(`
           SELECT attempt_id, payment_link_id, request_fingerprint, provider_code, provider_transaction_id, network_code, network_label,
                  payer_phone, amount::text, currency, state, provider_status, created_at, updated_at,
@@ -136,19 +133,21 @@ function createPaymentLinkRepository({ pool } = {}) {
       }
       return result.rows[0]
     },
-    async updateReceivableReservationState(attemptId, state) {
-      if (!['PENDING', 'UNKNOWN', 'ACTIVE', 'RELEASED', 'APPLIED'].includes(state)) throw new PaymentLinkError('PAYMENT_COLLECTION_STATE_CONFLICT', 409)
-      const result = await pool.query(`UPDATE payment_link_attempts
-        SET receivable_reservation_state = $2, updated_at = transaction_timestamp()
-        WHERE attempt_id = $1 AND receivable_reservation_id = $1 AND receivable_reservation_state <> 'APPLIED'
-        RETURNING attempt_id, receivable_reservation_id, receivable_reservation_state`, [attemptId, state])
-      if (!result.rows[0]) throw new PaymentLinkError('PAYMENT_COLLECTION_STATE_CONFLICT', 409)
-      return result.rows[0]
-    },
     async markAttemptSucceeded(attemptId, operationId) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        const target = (await client.query(`
+          SELECT l.collection_target_type
+            FROM payment_link_attempts a
+            JOIN payment_links l ON l.payment_link_id = a.payment_link_id
+           WHERE a.attempt_id = $1
+           FOR UPDATE OF a
+        `, [attemptId])).rows[0]
+        if (!target) throw new PaymentLinkError('PAYMENT_COLLECTION_STATE_CONFLICT', 409)
+        if (target.collection_target_type === 'AR_SETTLEMENT') {
+          throw new PaymentLinkError('COMMERCE_RECEIVABLES_DEFERRED', 410)
+        }
         await client.query(`
           UPDATE payment_link_attempts
              SET state = 'SUCCEEDED', ledger_operation_id = $2, updated_at = transaction_timestamp()
@@ -167,28 +166,6 @@ function createPaymentLinkRepository({ pool } = {}) {
         if (!attempt || attempt.state !== 'SUCCEEDED' || attempt.ledger_operation_id !== operationId) {
           throw new PaymentLinkError('PAYMENT_COLLECTION_STATE_CONFLICT', 409)
         }
-        if (attempt.collection_target_type === 'AR_SETTLEMENT') {
-          const closure = await client.query(`
-            INSERT INTO payment_link_receivable_closures (payment_link_id, receivable_id, collection_operation_id)
-            SELECT payment_link_id, receivable_id, $2 FROM payment_links
-             WHERE collection_target_type = 'AR_SETTLEMENT' AND receivable_id = $1
-            ON CONFLICT (payment_link_id) DO NOTHING
-          `, [attempt.receivable_id, operationId])
-          const conflictingClosure = await client.query(`
-            SELECT 1 FROM payment_link_receivable_closures c
-            JOIN payment_links l ON l.payment_link_id = c.payment_link_id
-            WHERE l.receivable_id = $1 AND (c.receivable_id <> $1 OR c.collection_operation_id <> $2)
-            LIMIT 1
-          `, [attempt.receivable_id, operationId])
-          if (conflictingClosure.rows.length) throw new PaymentLinkError('PAYMENT_COLLECTION_STATE_CONFLICT', 409)
-          await client.query(`UPDATE payment_link_attempts SET receivable_reservation_state = 'APPLIED'
-            WHERE receivable_reservation_id = $1`, [attempt.attempt_id])
-          if (closure.rowCount > 0) {
-            await client.query(`INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
-              VALUES ($1, 'payment_link.receivable_settled', 'receivable', $2, $3::jsonb)`,
-            [attempt.created_by_customer_id, attempt.receivable_id, JSON.stringify({ collection_operation_id: operationId, closed_link_count: closure.rowCount })])
-          }
-        }
         await client.query('COMMIT')
         return attempt
       } catch (error) {
@@ -198,6 +175,10 @@ function createPaymentLinkRepository({ pool } = {}) {
       } finally { client.release() }
     },
     async create({ amount, description, target, tokenHash, idempotencyKey, requestFingerprint, actorCustomerId }) {
+      if (!target || !['REVENUE', 'CUSTOMER_CREDIT'].includes(target.type)) {
+        const deferred = target?.type === 'AR_SETTLEMENT'
+        throw new PaymentLinkError(deferred ? 'COMMERCE_RECEIVABLES_DEFERRED' : 'PAYMENT_LINK_TARGET_INVALID', deferred ? 410 : 400)
+      }
       const client = await pool.connect()
       try {
         await client.query('BEGIN')

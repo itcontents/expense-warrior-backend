@@ -36,7 +36,7 @@ const MIGRATION_IDENTITY_CHECK_KEYS = new Set([
   'role_replication',
   'role_bypassrls',
 ])
-const MIGRATION_STAGE_LABELS = new Set(['schema_inventory', 'migration_ledger_read'])
+const MIGRATION_STAGE_LABELS = new Set(['schema_inventory', 'migration_ledger_read', 'migration_postconditions'])
 
 function serializeMigrationFailure(error) {
   const details = Array.isArray(error?.details)
@@ -274,6 +274,7 @@ async function inspectMigrationClient(client, target, migrations) {
     if ([...rowsByName.values()].some((count) => count > 1)) blockers.push('DUPLICATE_LEDGER_ROW')
 
     const applied = []
+    let postconditionResults = []
     for (const row of ledgerRows) {
       const source = migrationByName.get(String(row.migration_name || ''))
       if (!source) continue
@@ -289,7 +290,13 @@ async function inspectMigrationClient(client, target, migrations) {
     if (schemaState.ledger_exists) {
       if (applied.length === 0) blockers.push('EMPTY_MIGRATION_LEDGER')
       if (migrations.every(({ name }) => MIGRATION_POSTCONDITIONS[name])) {
-        const schemaChecks = await verifyMigrationPostconditions(client, migrations)
+        let schemaChecks
+        try {
+          schemaChecks = await verifyMigrationPostconditions(client, migrations)
+        } catch (error) {
+          error.migrationStage = 'migration_postconditions'
+          throw error
+        }
         const checkByName = new Map(schemaChecks.verified.map((check) => [check.migration, check]))
         for (const migration of applied) {
           if (!checkByName.get(migration.name)?.passed) blockers.push('POSTCONDITION_FAILED')
@@ -299,6 +306,7 @@ async function inspectMigrationClient(client, target, migrations) {
           if (!check || check.presentCount === 0) continue
           blockers.push(check.passed ? 'MIGRATION_SCHEMA_AHEAD_OF_LEDGER' : 'PARTIAL_MIGRATION_SCHEMA')
         }
+        postconditionResults = schemaChecks.verified
       }
     }
 
@@ -320,6 +328,7 @@ async function inspectMigrationClient(client, target, migrations) {
       applied,
       pending,
       blockers: [...new Set(blockers)],
+      ...(postconditionResults.length ? { postconditions: postconditionResults } : {}),
     }
   } finally {
     if (transactionStarted) await client.query('ROLLBACK').catch(() => {})
