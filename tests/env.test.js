@@ -19,13 +19,13 @@ test('loadConfig rejects missing dedicated database credentials', () => {
   )
 })
 
-test('ITC commerce receivables remain disabled unless explicitly released', () => {
+test('ITC commerce receivables cannot be enabled by an environment variable', () => {
   const values = {
     NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
     ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
   }
-  assert.equal(loadConfig(values).itc.commerceReceivablesEnabled, false)
-  assert.equal(loadConfig({ ...values, ITC_COMMERCE_RECEIVABLES_ENABLED: 'true' }).itc.commerceReceivablesEnabled, true)
+  assert.equal('commerceReceivablesEnabled' in loadConfig(values).itc, false)
+  assert.equal('commerceReceivablesEnabled' in loadConfig({ ...values, ITC_COMMERCE_RECEIVABLES_ENABLED: 'true' }).itc, false)
 })
 
 test('loadConfig keeps migration credentials out of the runtime and rejects partial or shared identities', () => {

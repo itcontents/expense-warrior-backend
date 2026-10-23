@@ -30,7 +30,7 @@ test('manager approval endpoint returns accepted while the ITC reservation is un
     },
   }, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests/${requestId}/manager/approve`, {
-      method: 'POST', headers: { Cookie: 'itc_backoffice_access=valid' },
+      method: 'POST', headers: { Cookie: 'itc_expense_warrior_access=valid' },
     })
     assert.equal(response.status, 202)
     assert.deepEqual(await response.json(), { data: {
@@ -48,7 +48,7 @@ test('manager approval endpoint returns success only after reservation and local
     approveManager: async () => ({ request: { request_id: requestId, status: 'MANAGER_APPROVED' }, pending: false, replayed: false }),
   }, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests/${requestId}/manager/approve`, {
-      method: 'POST', headers: { Cookie: 'itc_backoffice_access=valid' },
+      method: 'POST', headers: { Cookie: 'itc_expense_warrior_access=valid' },
     })
     assert.equal(response.status, 200)
     assert.equal((await response.json()).data.request.status, 'MANAGER_APPROVED')

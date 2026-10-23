@@ -81,7 +81,7 @@ test('cookieAuthenticatedMutationsRejectUntrustedOriginsBeforeITCIdentityLookup'
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests`, {
       method: 'POST',
       headers: {
-        cookie: 'itc_backoffice_access=valid',
+        cookie: 'itc_expense_warrior_access=valid',
         origin: 'https://untrusted.itcontents.com',
         'content-type': 'application/json',
       },
@@ -111,7 +111,7 @@ test('cookieAuthenticatedMutationsRequireAnExactTrustedOrigin', async () => {
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests`, {
       method: 'POST',
-      headers: { cookie: 'itc_backoffice_access=valid', 'content-type': 'application/json' },
+      headers: { cookie: 'itc_expense_warrior_access=valid', 'content-type': 'application/json' },
       body: JSON.stringify({}),
     })
     assert.equal(response.status, 403)
@@ -135,7 +135,7 @@ test('cookieAuthenticatedMutationsAcceptTheConfiguredBrowserOrigin', async () =>
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests`, {
       method: 'POST',
       headers: {
-        cookie: 'itc_backoffice_access=valid',
+        cookie: 'itc_expense_warrior_access=valid',
         origin: 'http://127.0.0.1:5175',
         'content-type': 'application/json',
       },
@@ -158,14 +158,14 @@ test('appMountsTheAdminOnlyPawaPayWalletBalanceRouteWhenProviderRegistryIsConfig
     itcFinanceClient: { getBalance: async () => ({ currency: 'ZMW', posted_balance: '300.00', active_holds: '55.00', available_balance: '245.00', as_of: '2026-10-15T12:00:00.000Z' }) },
   })
   await withServer(app, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/wallet/provider-balance`, { headers: { cookie: 'itc_backoffice_access=valid' } })
+    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/wallet/provider-balance`, { headers: { cookie: 'itc_expense_warrior_access=valid' } })
     assert.equal(response.status, 200)
     const payload = await response.json()
     assert.equal(requestedCountry, 'ZMB')
     assert.equal(payload.data.balances[0].balance, '245.00')
     assert.equal(payload.data.stale, false)
 
-    const ledger = await fetch(`${baseUrl}/api/v1/expense-warrior/wallet/ledger-balance`, { headers: { cookie: 'itc_backoffice_access=valid' } })
+    const ledger = await fetch(`${baseUrl}/api/v1/expense-warrior/wallet/ledger-balance`, { headers: { cookie: 'itc_expense_warrior_access=valid' } })
     assert.equal(ledger.status, 200)
     const ledgerPayload = await ledger.json()
     assert.equal(ledgerPayload.data.source, 'itc_ledger')

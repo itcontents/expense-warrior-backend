@@ -23,7 +23,7 @@ test('categories_requiresVerifiedItcSession', async () => {
 
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/categories`, {
-      headers: { Cookie: 'itc_backoffice_access=expired' },
+      headers: { Cookie: 'itc_expense_warrior_access=expired' },
     })
     assert.equal(response.status, 401)
     assert.equal(queryCalled, false)
@@ -49,7 +49,7 @@ test('categories_returnsActiveHierarchyInStableOrder', async () => {
 
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/categories`, {
-      headers: { Cookie: 'itc_backoffice_access=valid' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid' },
     })
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { data: { items: [
@@ -91,14 +91,14 @@ test('accounting category map administration is admin-only and validates against
 
   await withServer(app, async (baseUrl) => {
     const listed = await fetch(`${baseUrl}/api/v1/expense-warrior/admin/accounting-category-maps`, {
-      headers: { Cookie: 'itc_backoffice_access=valid' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid' },
     })
     assert.equal(listed.status, 200)
     assert.equal((await listed.json()).data.itc_categories[0].category_code, 'consumables')
 
     const saved = await fetch(`${baseUrl}/api/v1/expense-warrior/admin/categories/550e8400-e29b-41d4-a716-446655440000/accounting-map`, {
       method: 'PUT',
-      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ itc_expense_category_code: 'consumables' }),
     })
     assert.equal(saved.status, 200)
@@ -106,7 +106,7 @@ test('accounting category map administration is admin-only and validates against
 
     const invalid = await fetch(`${baseUrl}/api/v1/expense-warrior/admin/categories/550e8400-e29b-41d4-a716-446655440000/accounting-map`, {
       method: 'PUT',
-      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ itc_expense_category_code: 'inventory' }),
     })
     assert.equal(invalid.status, 422)
@@ -122,7 +122,7 @@ test('accounting category map configuration refuses staff actors', async () => {
   })
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/admin/accounting-category-maps`, {
-      headers: { Cookie: 'itc_backoffice_access=valid' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid' },
     })
     assert.equal(response.status, 403)
   })

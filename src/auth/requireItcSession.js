@@ -1,4 +1,4 @@
-const { hasBackofficeAccessCookie } = require('./cookieCsrfGuard')
+const { hasExpenseWarriorAccessCookie } = require('./cookieCsrfGuard')
 
 function createRequireItcSession(identityClient) {
   if (!identityClient || typeof identityClient.getSession !== 'function') {
@@ -6,7 +6,7 @@ function createRequireItcSession(identityClient) {
   }
 
   return async function requireItcSession(req, res, next) {
-    if (!hasBackofficeAccessCookie(req.headers?.cookie)) {
+    if (!hasExpenseWarriorAccessCookie(req.headers?.cookie)) {
       return res.status(401).json({
         error: { code: 'AUTHENTICATION_REQUIRED', message: 'Sign in to continue' },
       })

@@ -30,7 +30,7 @@ test('requireItcSession_rejectsMissingBackofficeCookie', async () => {
 test('requireItcSession_rejectsLookalikeCookieNames', async () => {
   let called = false
   const middleware = createRequireItcSession({ getSession: async () => { called = true } })
-  const req = { headers: { cookie: 'not_itc_backoffice_access=invalid; itc_backoffice_access_backup=invalid' }, requestId: 'req-lookalike' }
+  const req = { headers: { cookie: 'not_itc_expense_warrior_access=invalid; itc_expense_warrior_access_backup=invalid' }, requestId: 'req-lookalike' }
   const res = fakeResponse()
   let nextCalled = false
 
@@ -45,7 +45,7 @@ test('requireItcSession_setsOnlyVerifiedItcActor', async () => {
   const middleware = createRequireItcSession({
     getSession: async () => ({ customerId: 'staff-1', role: 'staff', active: true }),
   })
-  const req = { headers: { cookie: 'itc_backoffice_access=valid' }, requestId: 'req-2' }
+  const req = { headers: { cookie: 'itc_expense_warrior_access=valid' }, requestId: 'req-2' }
   const res = fakeResponse()
   let nextCalled = false
 
@@ -59,7 +59,7 @@ test('requireItcSession_failsClosedWhenItcIsUnavailable', async () => {
   const middleware = createRequireItcSession({
     getSession: async () => { const error = new Error('offline'); error.statusCode = 503; throw error },
   })
-  const req = { headers: { cookie: 'itc_backoffice_access=valid' }, requestId: 'req-3' }
+  const req = { headers: { cookie: 'itc_expense_warrior_access=valid' }, requestId: 'req-3' }
   const res = fakeResponse()
   let nextCalled = false
 
@@ -79,7 +79,7 @@ test('requireItcSession_preservesRateLimitAsRetryableWithoutExposingUpstreamBody
       throw error
     },
   })
-  const req = { headers: { cookie: 'itc_backoffice_access=valid' }, requestId: 'req-limited' }
+  const req = { headers: { cookie: 'itc_expense_warrior_access=valid' }, requestId: 'req-limited' }
   const res = fakeResponse()
 
   await middleware(req, res, () => assert.fail('rate-limited request must not continue'))

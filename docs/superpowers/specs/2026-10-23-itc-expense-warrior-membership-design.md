@@ -1,6 +1,6 @@
 # ITC Expense Warrior Membership Design
 
-**Status:** Draft for owner review  
+**Status:** Approved for implementation
 **Date:** 2026-10-23
 
 ## Intent
@@ -33,7 +33,7 @@ Allow company petty-cash users to use Expense Warrior with their existing ITC id
 
 ## Membership data and ownership
 
-ITC owns an additive `expense_warrior_memberships` record keyed by the existing ITC `customer_id`. V1 roles are `admin` and `staff`. The record includes active/revoked state, created/updated timestamps, and the ITC administrator identity that granted or changed it. Membership changes use an ITC audit event with old/new role and state; credentials and session tokens are never copied into this table.
+ITC owns an additive `expense_warrior_memberships` record keyed by the existing ITC `customer_id`. V1 roles are `admin` and `staff`. The record exposes `has_pettycash_access BOOLEAN` as the explicit access switch, plus the app role, created/updated timestamps, and the ITC administrator identity that granted or changed it. Membership changes use an ITC audit event with old/new role and access state; credentials and session tokens are never copied into this table. A missing membership row is treated as no access.
 
 There is one company membership scope in V1. If the product later serves multiple legal companies, add an explicit company/tenant key with a reviewed migration rather than inferring tenancy from Shop.IT vendor relationships.
 
@@ -42,7 +42,7 @@ Only an existing ITC global administrator may manage Expense Warrior membership.
 ## Authentication and authorization contract
 
 - Continue to use ITC credentials, password verification, 2FA, refresh/session services, and identity rows. Expense Warrior does not receive or persist bearer tokens in local storage.
-- **Proposed session boundary, pending owner approval:** add an `expense_warrior` audience with its own access/refresh cookie names, using the existing ITC sign-in and session machinery. This keeps credentials and auth implementation shared while preventing the Expense Warrior session from being mistaken for a Shop.IT backoffice session. ITC's audience inference, refresh handling, logout, and cookie helpers must explicitly support this audience; generic token extraction must not silently treat the Expense Warrior cookie as a backoffice cookie.
+- **Approved session boundary:** add an `expense_warrior` audience with its own access/refresh cookie names, using the existing ITC sign-in and session machinery. This keeps credentials and auth implementation shared while preventing the Expense Warrior session from being mistaken for a Shop.IT backoffice session. ITC's audience inference, refresh handling, logout, and cookie helpers must explicitly support this audience; generic token extraction must not silently treat the Expense Warrior cookie as a backoffice cookie.
 - The Expense Warrior audience login accepts only an active enrolled member after the existing password and 2FA checks. It must not turn an enrolled global `customer` or `vendor` into a general Shop.IT backoffice user. ITC's existing backoffice login and customer login behavior remain unchanged.
 - Session resolution returns the existing identity plus an explicit `expense_warrior_role` (`admin` or `staff`) only when membership is active. It never substitutes that value into the global `role` field.
 - ITC checks current membership when resolving every Expense Warrior session request, so disabling membership is effective on the next server-side check. Membership service failure fails closed for Expense Warrior access. Do not rely only on a role embedded in a long-lived access token.
@@ -86,7 +86,7 @@ The migration is to be authored and reviewed only after this design is approved.
 ## Decisions
 
 - Reuse ITC identity, password/2FA services, and session machinery: **yes**.
-- Dedicated `expense_warrior` audience and access/refresh cookies: **proposed; owner approval pending**.
+- Dedicated `expense_warrior` audience and access/refresh cookies: **approved**.
 - Membership onboarding: **enroll existing active ITC accounts; account creation/invitation stays in ITC's existing provisioning flow**.
 - Keep Shop.IT global role unchanged: **yes**.
 - Store Expense Warrior membership in ITC: **yes**.
@@ -98,7 +98,7 @@ The migration is to be authored and reviewed only after this design is approved.
 ## Remaining implementation choices
 
 - ITC endpoint and route names.
-- Whether the owner approves the dedicated `expense_warrior` session audience/cookie boundary.
-- Whether the existing sign-in screen safely supports that audience or needs a small ITC-owned login entry point backed by the same auth/session service.
-- Exact database field names, indexes, and migration number.
+- Expense Warrior login route and directory route names.
+- ITC admin UI placement for membership controls.
+- Migration number and guarded release registration.
 - ITC admin UI placement and audit event naming.

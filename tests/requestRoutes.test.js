@@ -66,7 +66,7 @@ test('requestRoutes_servesAuthorizedEvidenceInlineAsTheValidatedImageType', asyn
 
   await withServer(app, async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests/${requestId}/attachments/${attachmentId}`, {
-        headers: { Cookie: 'itc_backoffice_access=valid' },
+        headers: { Cookie: 'itc_expense_warrior_access=valid' },
       })
 
       assert.equal(response.status, 200)
@@ -84,7 +84,7 @@ test('requestRoutes_rejectsMalformedRequestBeforeDatabaseWrite', async () => {
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests`, {
       method: 'POST',
-      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json', 'Idempotency-Key': 'e1c5dc16-081f-4e89-98bd-a14a6f37fc2d' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json', 'Idempotency-Key': 'e1c5dc16-081f-4e89-98bd-a14a6f37fc2d' },
       body: JSON.stringify({ category_id: '45a79d36-1c70-4622-84d2-145a26f288d3', amount: 1.009, status: 'PAID' }),
     })
     assert.equal(response.status, 400)
@@ -97,7 +97,7 @@ test('requestRoutes_rejectsUnallowlistedSortBeforeDatabaseQuery', async () => {
   const { app } = appFor()
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests?sort=requester_customer_id%3Bdrop`, {
-      headers: { Cookie: 'itc_backoffice_access=valid' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid' },
     })
     assert.equal(response.status, 400)
     assert.equal((await response.json()).error.code, 'INVALID_FILTER')
@@ -109,7 +109,7 @@ test('requestRoutes_requiresRejectionReasonBeforeDatabaseAccess', async () => {
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests/6a168a4e-65ca-4887-9a9c-6137a8002aba/admin/reject`, {
       method: 'POST',
-      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason: '   ' }),
     })
     assert.equal(response.status, 400)

@@ -81,7 +81,7 @@ test('destination route rejects non-admin assignment before identity directory l
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   try {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/expense-warrior/admin/payout-destinations/${staffId}`, {
-      method: 'PUT', headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' },
+      method: 'PUT', headers: { Cookie: 'itc_expense_warrior_access=valid', 'Content-Type': 'application/json' },
       body: JSON.stringify({ network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783' }),
     })
     assert.equal(response.status, 403)
@@ -113,7 +113,7 @@ test('destination route verifies eligible identity before returning only masked 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   try {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/expense-warrior/admin/payout-destinations/${staffId}`, {
-      method: 'PUT', headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' },
+      method: 'PUT', headers: { Cookie: 'itc_expense_warrior_access=valid', 'Content-Type': 'application/json' },
       body: JSON.stringify({ network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783' }),
     })
     const payload = await response.json()

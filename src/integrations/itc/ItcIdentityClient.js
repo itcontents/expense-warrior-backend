@@ -9,11 +9,11 @@ class ItcIdentityError extends Error {
   }
 }
 
-function getBackofficeAccessCookie(cookieHeader) {
+function getExpenseWarriorAccessCookie(cookieHeader) {
   if (typeof cookieHeader !== 'string' || cookieHeader.length > 8192 || /[\r\n]/.test(cookieHeader)) return ''
   for (const pair of cookieHeader.split(';')) {
     const separator = pair.indexOf('=')
-    if (separator < 0 || pair.slice(0, separator).trim() !== 'itc_backoffice_access') continue
+    if (separator < 0 || pair.slice(0, separator).trim() !== 'itc_expense_warrior_access') continue
     const value = pair.slice(separator + 1).trim()
     return value && !/[;\r\n]/.test(value) ? value : ''
   }
@@ -31,7 +31,7 @@ class ItcIdentityClient {
   }
 
   async getSession(cookieHeader, requestId = '') {
-    const accessToken = getBackofficeAccessCookie(cookieHeader)
+    const accessToken = getExpenseWarriorAccessCookie(cookieHeader)
     if (!accessToken) throw new ItcIdentityError('ITC_SESSION_INVALID', 401)
 
     const controller = new AbortController()
@@ -43,8 +43,9 @@ class ItcIdentityClient {
         signal: controller.signal,
         headers: {
           Accept: 'application/json',
-          Cookie: `itc_backoffice_access=${accessToken}`,
-          'X-Session-Audience': 'backoffice',
+          Cookie: `itc_expense_warrior_access=${accessToken}`,
+          'X-Session-Audience': 'expense_warrior',
+          'X-Session-Response': 'cookie-only',
           ...(requestId ? { 'X-Request-Id': requestId } : {}),
         },
       })
@@ -82,13 +83,14 @@ class ItcIdentityClient {
       const customer = payload?.data?.customer
       if (payload?.success !== true ||
           !CUSTOMER_ID_PATTERN.test(String(customer?.customer_id || '')) ||
-          !['admin', 'staff', 'vendor', 'customer'].includes(String(customer?.role || '').toLowerCase())) {
+          !['admin', 'staff', 'vendor', 'customer'].includes(String(customer?.role || '').toLowerCase()) ||
+          !['admin', 'staff'].includes(String(customer?.expense_warrior_role || '').toLowerCase())) {
         throw new ItcIdentityError('ITC_IDENTITY_RESPONSE_INVALID', 502)
       }
 
       return {
         customerId: customer.customer_id,
-        role: String(customer.role).toLowerCase(),
+        role: String(customer.expense_warrior_role).toLowerCase(),
         active: true,
       }
     } catch (error) {
@@ -100,7 +102,7 @@ class ItcIdentityClient {
   }
 
   async listStaffDirectory(cookieHeader, filters = {}, requestId = '') {
-    const accessToken = getBackofficeAccessCookie(cookieHeader)
+    const accessToken = getExpenseWarriorAccessCookie(cookieHeader)
     if (!accessToken) throw new ItcIdentityError('ITC_SESSION_INVALID', 401)
     const search = typeof filters.search === 'string' ? filters.search : ''
     const ids = filters.ids === undefined ? null : filters.ids
@@ -111,7 +113,7 @@ class ItcIdentityClient {
       throw new ItcIdentityError('ITC_STAFF_DIRECTORY_FILTER_INVALID', 400)
     }
 
-    const url = new URL(`${this.baseUrl}/admin/expense-warrior/staff-directory`)
+    const url = new URL(`${this.baseUrl}/auth/expense-warrior/directory`)
     if (search) url.searchParams.set('search', search)
     if (ids) url.searchParams.set('ids', ids.join(','))
     url.searchParams.set('limit', String(limit))
@@ -125,7 +127,8 @@ class ItcIdentityClient {
         signal: controller.signal,
         headers: {
           Accept: 'application/json',
-          Cookie: `itc_backoffice_access=${accessToken}`,
+          Cookie: `itc_expense_warrior_access=${accessToken}`,
+          'X-Session-Audience': 'expense_warrior',
           ...(requestId ? { 'X-Request-Id': requestId } : {}),
         },
       })
@@ -141,9 +144,10 @@ class ItcIdentityClient {
       if (Buffer.byteLength(body, 'utf8') > 262144) throw new ItcIdentityError('ITC_IDENTITY_RESPONSE_INVALID', 502)
       let payload
       try { payload = JSON.parse(body) } catch { throw new ItcIdentityError('ITC_IDENTITY_RESPONSE_INVALID', 502) }
-      const staff = payload?.data?.staff
+      const staff = payload?.data?.members
       if (payload?.success !== true || !Array.isArray(staff) || staff.length > limit || staff.some((person) =>
         !CUSTOMER_ID_PATTERN.test(String(person?.customer_id || '')) ||
+        !['admin', 'staff'].includes(String(person?.expense_warrior_role || '').toLowerCase()) ||
         (person?.first_name !== null && person?.first_name !== undefined && (typeof person.first_name !== 'string' || person.first_name.length > 120)) ||
         (person?.last_name !== null && person?.last_name !== undefined && (typeof person.last_name !== 'string' || person.last_name.length > 120)) ||
         typeof person?.email !== 'string' || person.email.length > 254

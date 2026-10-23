@@ -1,5 +1,5 @@
 const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
-const BACKOFFICE_ACCESS_COOKIE = 'itc_backoffice_access'
+const EXPENSE_WARRIOR_ACCESS_COOKIE = 'itc_expense_warrior_access'
 
 function normalizeOrigin(value) {
   if (typeof value !== 'string' || !value.trim() || value.trim() === 'null') return ''
@@ -34,8 +34,8 @@ function parseAllowedBrowserOrigins(value = '') {
   return [...new Set(origins)]
 }
 
-function hasBackofficeAccessCookie(header = '') {
-  return String(header).split(';').some((part) => part.trim().split('=', 1)[0] === BACKOFFICE_ACCESS_COOKIE)
+function hasExpenseWarriorAccessCookie(header = '') {
+  return String(header).split(';').some((part) => part.trim().split('=', 1)[0] === EXPENSE_WARRIOR_ACCESS_COOKIE)
 }
 
 function isAllowedBrowserOrigin(origin, allowedOrigins, nodeEnv) {
@@ -51,7 +51,7 @@ function createCookieCsrfGuard({ allowedOrigins = [], nodeEnv = process.env.NODE
   const trustedOrigins = new Set(allowedOrigins)
   return function cookieCsrfGuard(req, res, next) {
     if (!STATE_CHANGING_METHODS.has(String(req.method || '').toUpperCase()) ||
-        !hasBackofficeAccessCookie(req.headers?.cookie)) {
+        !hasExpenseWarriorAccessCookie(req.headers?.cookie)) {
       return next()
     }
     if (isAllowedBrowserOrigin(req.headers?.origin, trustedOrigins, nodeEnv)) return next()
@@ -61,4 +61,4 @@ function createCookieCsrfGuard({ allowedOrigins = [], nodeEnv = process.env.NODE
   }
 }
 
-module.exports = { createCookieCsrfGuard, hasBackofficeAccessCookie, parseAllowedBrowserOrigins }
+module.exports = { createCookieCsrfGuard, hasExpenseWarriorAccessCookie, parseAllowedBrowserOrigins }
