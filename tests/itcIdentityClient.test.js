@@ -44,6 +44,19 @@ test('identityClient_mapsExpiredSessionToUnauthorized', async () => {
   await assert.rejects(client.getSession('itc_backoffice_access=value'), (error) => error.statusCode === 401)
 })
 
+test('identityClient_preservesOnlyBoundedRetryAfterForRateLimitedSession', async () => {
+  const client = new ItcIdentityClient({
+    baseUrl: 'https://itc.example/api/v1',
+    fetchImpl: async () => new Response(JSON.stringify({ error: 'limited' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '37' },
+    }),
+  })
+
+  await assert.rejects(client.getSession('itc_backoffice_access=value'), (error) =>
+    error.statusCode === 429 && error.retryAfterSeconds === 37 && error.code === 'ITC_IDENTITY_RATE_LIMITED')
+})
+
 test('identityClient_mapsTimeoutToUnavailable', async () => {
   const client = new ItcIdentityClient({
     baseUrl: 'https://itc.example/api/v1',

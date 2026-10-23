@@ -6,7 +6,9 @@ function fakeResponse() {
   return {
     statusCode: 200,
     body: null,
+    headers: {},
     status(code) { this.statusCode = code; return this },
+    set(name, value) { this.headers[name.toLowerCase()] = value; return this },
     json(body) { this.body = body; return this },
   }
 }
@@ -66,4 +68,27 @@ test('requireItcSession_failsClosedWhenItcIsUnavailable', async () => {
   assert.equal(res.statusCode, 503)
   assert.deepEqual(res.body.error, { code: 'ITC_IDENTITY_UNAVAILABLE', message: 'Identity service is temporarily unavailable' })
   assert.equal(nextCalled, false)
+})
+
+test('requireItcSession_preservesRateLimitAsRetryableWithoutExposingUpstreamBody', async () => {
+  const middleware = createRequireItcSession({
+    getSession: async () => {
+      const error = new Error('upstream response body must not be exposed')
+      error.statusCode = 429
+      error.retryAfterSeconds = 37
+      throw error
+    },
+  })
+  const req = { headers: { cookie: 'itc_backoffice_access=valid' }, requestId: 'req-limited' }
+  const res = fakeResponse()
+
+  await middleware(req, res, () => assert.fail('rate-limited request must not continue'))
+
+  assert.equal(res.statusCode, 429)
+  assert.equal(res.headers['retry-after'], '37')
+  assert.deepEqual(res.body, { error: {
+    code: 'ITC_IDENTITY_RATE_LIMITED',
+    message: 'Too many requests right now. Wait a moment, then try again.',
+    retry_after_seconds: 37,
+  } })
 })

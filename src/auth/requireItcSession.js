@@ -26,6 +26,19 @@ function createRequireItcSession(identityClient) {
           error: { code: 'ITC_IDENTITY_UNAVAILABLE', message: 'Identity service is temporarily unavailable' },
         })
       }
+      if (error.statusCode === 429) {
+        const retryAfterSeconds = Number.isSafeInteger(error.retryAfterSeconds) && error.retryAfterSeconds >= 1 && error.retryAfterSeconds <= 3600
+          ? error.retryAfterSeconds
+          : null
+        if (retryAfterSeconds !== null) res.set('Retry-After', String(retryAfterSeconds))
+        return res.status(429).json({
+          error: {
+            code: 'ITC_IDENTITY_RATE_LIMITED',
+            message: 'Too many requests right now. Wait a moment, then try again.',
+            ...(retryAfterSeconds !== null ? { retry_after_seconds: retryAfterSeconds } : {}),
+          },
+        })
+      }
       return res.status(502).json({
         error: { code: 'ITC_IDENTITY_RESPONSE_INVALID', message: 'Identity service returned an invalid response' },
       })

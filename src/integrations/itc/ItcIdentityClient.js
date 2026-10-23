@@ -52,6 +52,15 @@ class ItcIdentityClient {
       if (response.status === 401 || response.status === 403) {
         throw new ItcIdentityError('ITC_SESSION_INVALID', 401)
       }
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('retry-after') || ''
+        const retryAfterSeconds = /^\d{1,4}$/.test(retryAfter) ? Number(retryAfter) : null
+        const error = new ItcIdentityError('ITC_IDENTITY_RATE_LIMITED', 429)
+        if (Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds >= 1 && retryAfterSeconds <= 3600) {
+          error.retryAfterSeconds = retryAfterSeconds
+        }
+        throw error
+      }
       if (response.status !== 200) throw new ItcIdentityError('ITC_IDENTITY_UNAVAILABLE', 503)
 
       const contentType = response.headers.get('content-type') || ''
