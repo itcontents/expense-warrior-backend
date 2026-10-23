@@ -182,49 +182,6 @@ class ItcFinanceClient {
     return this.#request('POST', `/internal/expense-warrior/holds/${encodeURIComponent(holdId)}/consume`, { payload, idempotencyKey, requestId })
   }
 
-  async getReceivables(customerId, { limit = 50, cursor = null } = {}, requestId = '') {
-    if (!UUID_PATTERN.test(String(customerId || '')) || !Number.isInteger(limit) || limit < 1 || limit > 100 ||
-        (cursor !== null && (typeof cursor !== 'string' || cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(cursor)))) {
-      throw new ItcFinanceError('ITC_FINANCE_REQUEST_INVALID', 400)
-    }
-    const query = new URLSearchParams({ limit: String(limit) })
-    if (cursor) query.set('cursor', cursor)
-    const data = await this.#request('GET', `/internal/expense-warrior/customers/${encodeURIComponent(customerId)}/receivables?${query}`, { requestId })
-    const result = data.receivables
-    if (!result || typeof result !== 'object' || Array.isArray(result) || !Array.isArray(result.items) ||
-        result.items.length > limit || typeof result.has_more !== 'boolean' ||
-        (result.next_cursor !== null && typeof result.next_cursor !== 'string') ||
-        (result.has_more && !result.next_cursor) || (!result.has_more && result.next_cursor !== null) ||
-        !Number.isFinite(Date.parse(result.as_of)) || result.items.some((row) =>
-          !row || typeof row !== 'object' || Array.isArray(row) ||
-          !UUID_PATTERN.test(String(row.receivable_id || '')) || !UUID_PATTERN.test(String(row.order_id || '')) || !UUID_PATTERN.test(String(row.customer_id || '')) ||
-          row.customer_id.toLowerCase() !== customerId.toLowerCase() ||
-          typeof row.invoice_number !== 'string' || row.invoice_number.length < 1 || row.invoice_number.length > 120 ||
-          !MONEY_PATTERN.test(String(row.original_amount || '')) || !MONEY_PATTERN.test(String(row.applied_amount || '')) ||
-          !MONEY_PATTERN.test(String(row.outstanding_amount || '')) || row.currency !== 'ZMW' ||
-          !['OPEN', 'PARTIALLY_PAID', 'PARTIALLY_CREDITED'].includes(row.status) || !Number.isFinite(Date.parse(row.issued_at)))) {
-      throw new ItcFinanceError('ITC_FINANCE_RESPONSE_INVALID', 502)
-    }
-    return result
-  }
-
-  async getReceivable(customerId, receivableId, requestId = '') {
-    if (!UUID_PATTERN.test(String(customerId || '')) || !UUID_PATTERN.test(String(receivableId || ''))) {
-      throw new ItcFinanceError('ITC_FINANCE_REQUEST_INVALID', 400)
-    }
-    const data = await this.#request('GET', `/internal/expense-warrior/customers/${encodeURIComponent(customerId)}/receivables/${encodeURIComponent(receivableId)}`, { requestId })
-    const row = data.receivable
-    if (!row || typeof row !== 'object' || Array.isArray(row) ||
-        row.receivable_id?.toLowerCase() !== receivableId.toLowerCase() ||
-        row.customer_id?.toLowerCase() !== customerId.toLowerCase() ||
-        !UUID_PATTERN.test(String(row.order_id || '')) || typeof row.invoice_number !== 'string' ||
-        !MONEY_PATTERN.test(String(row.outstanding_amount || '')) || row.currency !== 'ZMW' ||
-        !['OPEN', 'PARTIALLY_PAID', 'PARTIALLY_CREDITED'].includes(row.status) || !Number.isFinite(Date.parse(row.issued_at))) {
-      throw new ItcFinanceError('ITC_FINANCE_RESPONSE_INVALID', 502)
-    }
-    return row
-  }
-
   async getCustomerCreditBalance(customerId, requestId = '') {
     if (!UUID_PATTERN.test(String(customerId || ''))) throw new ItcFinanceError('ITC_FINANCE_REQUEST_INVALID', 400)
     const data = await this.#request('GET', `/internal/expense-warrior/customers/${encodeURIComponent(customerId)}/customer-credit`, { requestId })
@@ -235,44 +192,6 @@ class ItcFinanceClient {
       throw new ItcFinanceError('ITC_FINANCE_RESPONSE_INVALID', 502)
     }
     return balance
-  }
-
-  async reserveCustomerReceivablePayment(payload, idempotencyKey, requestId) {
-    if (!UUID_PATTERN.test(String(payload?.receivable_id || '')) ||
-        !UUID_PATTERN.test(String(payload?.reservation_id || '')) ||
-        !UUID_PATTERN.test(String(payload?.collection_attempt_id || '')) ||
-        !/^[A-Za-z0-9._:-]{8,128}$/.test(String(idempotencyKey || ''))) {
-      throw new ItcFinanceError('ITC_FINANCE_REQUEST_INVALID', 400)
-    }
-    const data = await this.#request('POST', '/internal/expense-warrior/receivable-reservations', { payload, idempotencyKey, requestId })
-    const reservation = data.reservation
-    if (!reservation || typeof reservation !== 'object' || Array.isArray(reservation) ||
-        reservation.reservation_id?.toLowerCase() !== payload.reservation_id.toLowerCase() ||
-        reservation.receivable_id?.toLowerCase() !== payload.receivable_id.toLowerCase() ||
-        reservation.collection_attempt_id?.toLowerCase() !== payload.collection_attempt_id.toLowerCase() ||
-        !MONEY_PATTERN.test(String(reservation.amount || '')) || reservation.amount !== payload.amount ||
-        reservation.currency_code !== 'ZMW' || !['ACTIVE', 'RELEASED', 'APPLIED'].includes(reservation.state)) {
-      throw new ItcFinanceError('ITC_FINANCE_RESPONSE_INVALID', 502)
-    }
-    return { reservation }
-  }
-
-  async releaseCustomerReceivablePayment(reservationId, payload, idempotencyKey, requestId) {
-    if (!UUID_PATTERN.test(String(reservationId || '')) || !UUID_PATTERN.test(String(payload?.operation_id || '')) ||
-        !/^[A-Za-z0-9._:-]{8,128}$/.test(String(idempotencyKey || ''))) {
-      throw new ItcFinanceError('ITC_FINANCE_REQUEST_INVALID', 400)
-    }
-    const data = await this.#request('POST', `/internal/expense-warrior/receivable-reservations/${encodeURIComponent(reservationId)}/release`, { payload, idempotencyKey, requestId })
-    const reservation = data.reservation
-    if (!reservation || typeof reservation !== 'object' || reservation.state !== 'RELEASED' ||
-        reservation.reservation_id?.toLowerCase() !== reservationId.toLowerCase()) {
-      throw new ItcFinanceError('ITC_FINANCE_RESPONSE_INVALID', 502)
-    }
-    return { reservation }
-  }
-
-  async applyCustomerReceivablePayment(payload, idempotencyKey, requestId) {
-    return this.#postCollection('/internal/expense-warrior/collections/ar-settlements', payload, idempotencyKey, requestId)
   }
 
   async creditCustomerAccount(payload, idempotencyKey, requestId) {

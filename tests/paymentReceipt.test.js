@@ -12,6 +12,8 @@ const paidAttempt = {
   payment_link_id: '20000000-0000-4000-8000-000000000001',
   public_token_hash: crypto.createHash('sha256').update(token).digest('hex'),
   description: 'Office supplies',
+  collection_target_type: 'REVENUE',
+  revenue_account_code: '4000',
   provider_code: 'pawapay',
   provider_transaction_id: attemptId,
   provider_reference: 'provider-reference-123',

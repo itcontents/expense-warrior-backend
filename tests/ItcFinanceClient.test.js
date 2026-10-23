@@ -295,65 +295,36 @@ test('getLedgerHistory signs bounded date filters and validates its keyset respo
   await assert.rejects(client.getLedgerHistory({ limit: 501 }), { code: 'ITC_FINANCE_REQUEST_INVALID' })
 })
 
-test('customer collection methods use signed ITC routes and validate authoritative responses', async () => {
+test('customer-credit collection uses its signed route and validates the returned operation', async () => {
   const calls = []
-  const receivable = {
-    receivable_id: operationId, customer_id: '50000000-0000-4000-8000-000000000001',
-    invoice_number: 'Q-2026-001', order_id: '70000000-0000-4000-8000-000000000001', original_amount: '75.00', applied_amount: '0.00',
-    outstanding_amount: '75.00', currency: 'ZMW', status: 'PARTIALLY_CREDITED',
-    issued_at: '2026-10-15T12:00:00.000Z',
-  }
+  const customerId = '50000000-0000-4000-8000-000000000001'
   const operation = { operation_id: operationId, state: 'APPLIED' }
   const client = new ItcFinanceClient({
     baseUrl: 'https://itc.test/api/v1', keyId, secretBase64,
     fetchImpl: async (url, options) => {
       calls.push({ url: String(url), options })
       const path = new URL(String(url)).pathname
-      if (path.endsWith('/customers/50000000-0000-4000-8000-000000000001/receivables')) {
-        return response(200, { success: true, data: { receivables: { items: [receivable], has_more: false, next_cursor: null, as_of: '2026-10-15T12:00:00.000Z' } } })
-      }
-      if (path.endsWith(`/customers/${receivable.customer_id}/receivables/${receivable.receivable_id}`)) {
-        return response(200, { success: true, data: { receivable } })
-      }
-      if (path.endsWith('/receivable-reservations')) {
-        const body = JSON.parse(options.body)
-        return response(201, { success: true, data: { reservation: { reservation_id: body.reservation_id,
-          receivable_id: body.receivable_id, collection_attempt_id: body.collection_attempt_id, amount: body.amount,
-          currency_code: 'ZMW', state: 'ACTIVE' } } })
-      }
-      if (path.endsWith('/customer-credit')) return response(200, { success: true, data: { balance: { customer_id: receivable.customer_id, currency: 'ZMW', available_credit: '25.00', as_of: '2026-10-15T12:00:00.000Z' } } })
+      if (path.endsWith('/customer-credit')) return response(200, { success: true, data: { balance: { customer_id: customerId, currency: 'ZMW', available_credit: '25.00', as_of: '2026-10-15T12:00:00.000Z' } } })
       return response(201, { success: true, data: { operation } })
     },
     nonceFactory: () => nonce, requestIdFactory: () => requestId, now: () => 1792080000000,
   })
-  assert.deepEqual(await client.getReceivables(receivable.customer_id, { limit: 10 }, requestId), {
-    items: [receivable], has_more: false, next_cursor: null, as_of: '2026-10-15T12:00:00.000Z',
-  })
-  assert.equal((await client.getReceivable(receivable.customer_id, receivable.receivable_id, requestId)).outstanding_amount, '75.00')
-  const reservation = { reservation_id: '80000000-0000-4000-8000-000000000001', payment_link_id: '70000000-0000-4000-8000-000000000002',
-    collection_attempt_id: '70000000-0000-4000-8000-000000000003', actor_customer_id: '60000000-0000-4000-8000-000000000001',
-    customer_id: receivable.customer_id, receivable_id: receivable.receivable_id, amount: '75.00', currency: 'ZMW' }
-  assert.equal((await client.reserveCustomerReceivablePayment(reservation, 'ew-ar-reserve-key', requestId)).reservation.state, 'ACTIVE')
+  for (const legacyMethod of ['getReceivables', 'getReceivable', 'reserveCustomerReceivablePayment', 'releaseCustomerReceivablePayment', 'applyCustomerReceivablePayment']) {
+    assert.equal(typeof client[legacyMethod], 'undefined', `${legacyMethod} is not part of the V1 client contract`)
+  }
   const collection = { operation_id: operationId, actor_customer_id: '60000000-0000-4000-8000-000000000001',
-    customer_id: receivable.customer_id, amount: '25.00', currency: 'ZMW',
-    provider_code: 'pawapay', provider_transaction_id: 'provider-tx-001',
-    provider_reference: 'provider-ref-001', collection_attempt_id: '70000000-0000-4000-8000-000000000001',
-    verified_at: '2026-10-15T12:00:00.000Z', evidence_digest: 'a'.repeat(64) }
-  assert.deepEqual(await client.applyCustomerReceivablePayment({ ...collection, allocations: [{ order_id: receivable.order_id, amount: '25.00' }] }, 'ar-key-0001', requestId), { operation })
+    customer_id: customerId, amount: '25.00', currency: 'ZMW', provider_code: 'pawapay',
+    provider_transaction_id: 'provider-tx-001', provider_reference: 'provider-ref-001',
+    collection_attempt_id: '70000000-0000-4000-8000-000000000001', verified_at: '2026-10-15T12:00:00.000Z', evidence_digest: 'a'.repeat(64) }
   assert.deepEqual(await client.creditCustomerAccount(collection, 'credit-key-0001', requestId), { operation })
   assert.deepEqual(await client.postEarnedRevenueCollection({ ...collection, revenue_account_code: '4000' }, 'revenue-key-0001', requestId), { operation })
-  assert.equal((await client.getCustomerCreditBalance(receivable.customer_id, requestId)).available_credit, '25.00')
+  assert.equal((await client.getCustomerCreditBalance(customerId, requestId)).available_credit, '25.00')
   assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), [
-    `/api/v1/internal/expense-warrior/customers/${receivable.customer_id}/receivables`,
-    `/api/v1/internal/expense-warrior/customers/${receivable.customer_id}/receivables/${receivable.receivable_id}`,
-    '/api/v1/internal/expense-warrior/receivable-reservations',
-    '/api/v1/internal/expense-warrior/collections/ar-settlements',
     '/api/v1/internal/expense-warrior/collections/customer-credits',
     '/api/v1/internal/expense-warrior/collections/revenue',
-    `/api/v1/internal/expense-warrior/customers/${receivable.customer_id}/customer-credit`,
+    `/api/v1/internal/expense-warrior/customers/${customerId}/customer-credit`,
   ])
-  assert.equal(calls[3].options.headers['Idempotency-Key'], 'ar-key-0001')
-  assert.equal(calls[6].options.method, 'GET')
+  assert.equal(calls[2].options.method, 'GET')
 })
 
 test('revenue account catalog uses the signed route and rejects malformed account data', async () => {
@@ -380,15 +351,4 @@ test('revenue account catalog uses the signed route and rejects malformed accoun
     nonceFactory: () => nonce, now: () => 1792080000000,
   })
   await assert.rejects(invalid.getRevenueAccounts(requestId), { code: 'ITC_FINANCE_RESPONSE_INVALID', statusCode: 502 })
-})
-
-test('customer collection client rejects invalid identity, pagination, and malformed response shapes', async () => {
-  const client = new ItcFinanceClient({
-    baseUrl: 'https://itc.test/api/v1', keyId, secretBase64,
-    fetchImpl: async () => response(200, { success: true, data: { receivables: [{}], has_more: true, next_cursor: null } }),
-    nonceFactory: () => nonce, now: () => 1792080000000,
-  })
-  await assert.rejects(client.getReceivables('not-a-uuid'), { code: 'ITC_FINANCE_REQUEST_INVALID', statusCode: 400 })
-  await assert.rejects(client.getReceivables(operationId, { limit: 501 }), { code: 'ITC_FINANCE_REQUEST_INVALID', statusCode: 400 })
-  await assert.rejects(client.getReceivables(operationId), { code: 'ITC_FINANCE_RESPONSE_INVALID', statusCode: 502 })
 })

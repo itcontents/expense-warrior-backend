@@ -11,7 +11,6 @@ const createSchema = Joi.object({
   target: Joi.alternatives().try(
     Joi.object({ type: Joi.string().valid('REVENUE').required(), revenue_account_code: Joi.string().pattern(/^\d{4}$/).required() }).unknown(false),
     Joi.object({ type: Joi.string().valid('CUSTOMER_CREDIT').required(), customer_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required() }).unknown(false),
-    Joi.object({ type: Joi.string().valid('AR_SETTLEMENT').required(), customer_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required(), receivable_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required() }).unknown(false),
   ).required(),
 }).unknown(false)
 const listSchema = Joi.object({ limit: Joi.number().integer().min(1).max(100), offset: Joi.number().integer().min(0).max(1000000) }).unknown(false)
@@ -22,7 +21,7 @@ const customerSearchSchema = Joi.object({
 }).unknown(false)
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient, receivablesEnabled = false } = {}) {
+function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient } = {}) {
   if (!paymentLinkService || typeof paymentLinkService.createLink !== 'function' || typeof paymentLinkService.listLinks !== 'function' || typeof paymentLinkService.disableLink !== 'function') throw new TypeError('Payment-link service is required')
   const router = express.Router()
   const requireSession = createRequireItcSession(identityClient)
@@ -33,11 +32,6 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
     if (error instanceof PaymentLinkError) return res.status(error.statusCode).json({ error: { code: error.code, message: error.code.replaceAll('_', ' ').toLowerCase() } })
     return res.status(503).json({ error: { code: 'PAYMENT_LINKS_UNAVAILABLE', message: 'Payment links are temporarily unavailable' } })
   }
-
-  router.get('/payment-links/capabilities', requireSession, adminOnly, (_req, res) => {
-    res.set('Cache-Control', 'private, no-store')
-    return res.status(200).json({ data: { receivables_enabled: receivablesEnabled === true } })
-  })
 
   router.get('/payment-links', requireSession, adminOnly, async (req, res) => {
     const { value, error } = listSchema.validate(req.query, { convert: true })
@@ -60,27 +54,6 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
       return res.status(status).json({ error: { code, message: 'Customer search is temporarily unavailable' } })
     }
   })
-  router.get('/payment-links/customers/:customer_id/receivables', requireSession, adminOnly, async (req, res) => {
-    if (!UUID.test(req.params.customer_id)) return res.status(400).json({ error: { code: 'INVALID_CUSTOMER_ID', message: 'Customer identifier is invalid' } })
-    if (receivablesEnabled !== true) return res.status(410).json({ error: { code: 'COMMERCE_RECEIVABLES_DEFERRED', message: 'Invoice collections are not available yet' } })
-    if (!itcFinanceClient || typeof itcFinanceClient.getReceivables !== 'function') {
-      return res.status(503).json({ error: { code: 'RECEIVABLES_UNAVAILABLE', message: 'Delivered invoices are temporarily unavailable' } })
-    }
-    const { value, error } = Joi.object({
-      limit: Joi.number().integer().min(1).max(100).default(50),
-      cursor: Joi.string().max(512),
-    }).unknown(false).validate(req.query, { convert: true, abortEarly: false })
-    if (error) return res.status(400).json({ error: { code: 'INVALID_RECEIVABLE_FILTER', message: 'Invoice filters are invalid' } })
-    try {
-      const receivables = await itcFinanceClient.getReceivables(req.params.customer_id, { limit: value.limit, cursor: value.cursor || null }, req.requestId)
-      res.set('Cache-Control', 'private, no-store')
-      return res.status(200).json({ data: { receivables } })
-    } catch (errorCause) {
-      const status = errorCause instanceof ItcFinanceError ? errorCause.statusCode : 503
-      const code = errorCause instanceof ItcFinanceError ? errorCause.code : 'RECEIVABLES_UNAVAILABLE'
-      return res.status(status).json({ error: { code, message: 'Delivered invoices are temporarily unavailable' } })
-    }
-  })
   router.get('/payment-links/revenue-accounts', requireSession, adminOnly, async (req, res) => {
     if (!itcFinanceClient || typeof itcFinanceClient.getRevenueAccounts !== 'function') {
       return res.status(503).json({ error: { code: 'REVENUE_ACCOUNTS_UNAVAILABLE', message: 'Revenue accounts are temporarily unavailable' } })
@@ -100,9 +73,6 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
     if (error) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_LINK', message: 'Add a description and a fixed ZMW amount with two decimal places' } })
     const idempotencyKey = req.get('Idempotency-Key')
     if (!UUID.test(String(idempotencyKey || ''))) return res.status(400).json({ error: { code: 'INVALID_IDEMPOTENCY_KEY', message: 'A valid Idempotency-Key is required' } })
-    if (value.target.type === 'AR_SETTLEMENT' && receivablesEnabled !== true) {
-      return res.status(410).json({ error: { code: 'COMMERCE_RECEIVABLES_DEFERRED', message: 'Invoice collections are not available yet' } })
-    }
     if (!itcFinanceClient) return res.status(503).json({ error: { code: 'COLLECTION_TARGET_UNAVAILABLE', message: 'Collection targets are temporarily unavailable' } })
     try {
       if (value.target.type === 'REVENUE') {
@@ -114,14 +84,6 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
         const balance = await itcFinanceClient.getCustomerCreditBalance(value.target.customer_id, req.requestId)
         if (balance.customer_id.toLowerCase() !== value.target.customer_id.toLowerCase()) {
           return res.status(422).json({ error: { code: 'CUSTOMER_UNAVAILABLE', message: 'Choose an active ITC customer account' } })
-        }
-      } else if (value.target.type === 'AR_SETTLEMENT') {
-        const receivable = await itcFinanceClient.getReceivable(value.target.customer_id, value.target.receivable_id, req.requestId)
-        if (receivable.customer_id.toLowerCase() !== value.target.customer_id.toLowerCase() ||
-            receivable.receivable_id.toLowerCase() !== value.target.receivable_id.toLowerCase() ||
-            receivable.currency !== 'ZMW' || !['OPEN', 'PARTIALLY_PAID', 'PARTIALLY_CREDITED'].includes(receivable.status) ||
-            receivable.outstanding_amount !== value.amount) {
-          return res.status(422).json({ error: { code: 'RECEIVABLE_UNAVAILABLE', message: 'Choose a delivered invoice with the exact outstanding ZMW balance' } })
         }
       }
       const result = await paymentLinkService.createLink(req.actor, { ...value, publicToken: value.public_token }, idempotencyKey)

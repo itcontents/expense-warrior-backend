@@ -15,7 +15,6 @@ const configSchema = Joi.object({
   ITC_API_BASE_URL: Joi.string().uri({ scheme: ['http', 'https'] }).required(),
   ITC_IDENTITY_TIMEOUT_MS: Joi.number().integer().min(500).max(15000).default(5000),
   ITC_FINANCE_TIMEOUT_MS: Joi.number().integer().min(500).max(30000).default(10000),
-  ITC_COMMERCE_RECEIVABLES_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
   ITC_SERVICE_CLIENT_ID: Joi.string().trim().allow('').default(''),
   ITC_SERVICE_CLIENT_SECRET: Joi.string().allow('').default(''),
   CLOUDINARY_CLOUD_NAME: Joi.string().allow('').default(''),
@@ -180,7 +179,6 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
       financeTimeoutMs: value.ITC_FINANCE_TIMEOUT_MS,
       serviceClientId: value.ITC_SERVICE_CLIENT_ID,
       serviceClientSecret: value.ITC_SERVICE_CLIENT_SECRET,
-      commerceReceivablesEnabled: value.ITC_COMMERCE_RECEIVABLES_ENABLED,
     }),
     pawaPay: Object.freeze({
       baseUrl: value.PAWAPAY_BASE_URL,

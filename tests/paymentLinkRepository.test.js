@@ -35,7 +35,6 @@ function createMemoryPool() {
               collection_target_type: params[4],
               revenue_account_code: params[5],
               customer_id: params[6],
-              receivable_id: params[7],
             }
             state.links.set(id, link)
             return { rows: [link] }
@@ -110,16 +109,14 @@ test('payment-link repository rejects changed content for a reused key without c
   assert.equal(pool.state.auditEvents, 1)
 })
 
-test('payment-link repository persists an A/R target with customer and receivable identities', async () => {
-  const pool = createMemoryPool()
-  const repository = createPaymentLinkRepository({ pool })
-  const result = await repository.create({
-    ...input,
-    target: { type: 'AR_SETTLEMENT', customerId: '50000000-0000-4000-8000-000000000001', receivableId: '60000000-0000-4000-8000-000000000002' },
-  })
-  assert.equal(result.link.collection_target_type, 'AR_SETTLEMENT')
-  assert.equal(result.link.customer_id, '50000000-0000-4000-8000-000000000001')
-  assert.equal(result.link.receivable_id, '60000000-0000-4000-8000-000000000002')
+test('payment-link repository history contains only revenue and customer-credit target fields', async () => {
+  let query
+  const repository = createPaymentLinkRepository({ pool: {
+    connect: async () => { throw new Error('unused') },
+    query: async (sql) => { query = sql; return { rows: [] } },
+  } })
+  await repository.list({ limit: 10, offset: 0 })
+  assert.doesNotMatch(query, /receivable|settled_at/i)
 })
 
 test('payment-link repository finds an existing attempt by opaque link hash and idempotency key', async () => {
