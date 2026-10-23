@@ -8,7 +8,15 @@
 - Expense Warrior local collections, payouts, and callback-inbox gates are enabled against PawaPay sandbox. ITC's finance gate is enabled locally, but the current ITC `.env` names database `itc`; the previously approved development target is `local_staging`. ITC `/api/v1/ready` is HTTP 200, but that response does not identify its connected database or prove Expense Warrior finance readiness. No signed finance request was made because accepted requests persist a replay nonce.
 - PawaPay's read-only Zambia/ZMW deposit configuration returned Airtel, MTN, and Zamtel. Merchant-account callback delivery remains unverified. ITC payment workers remain disabled and collection-refund processing remains off. No payment, payout, refund, migration, or database write was performed.
 
-## Current release snapshot — 2026-10-22
+## Latest repository and validation verification — 2026-10-23
+
+- `origin/staging` contains the API V1 tree at `dbc34ad` after the merge from `main`. Local `staging` adds one unpushed documentation-only commit. The user's untracked `tsconfig.json` remains preserved.
+- The API source tree at `dbc34ad` matches the V1 tree tested immediately before the remote merge: `npm test` passed 397 with 4 database-gated skips. The frontend `npm test` passed 69/69 and `npm run build` passed. The API `/api/v1/ready` returned HTTP 200 on port 3100.
+- Browser fixture review covered Admin overview/reports, Manager approvals, request creation, public payment page, and payment receipt at 320×740 and 390×844. No horizontal overflow, console errors, or `/api/` requests were observed. This does not verify authenticated production flows or a financial transaction.
+- The current host address is `192.168.10.58`; frontend `/design-preview` and `/sign-in` return HTTP 200 at port 5175. `192.168.1.139` is no longer this host's address.
+- No ITC finance call, database write, migration, payment/refund, deployment, or push was performed. Cross-repo A/R policy/target alignment, callback delivery, signed finance readiness, sandbox reconciliation, and production readiness remain outstanding gates.
+
+## Previous release snapshot — 2026-10-22
 
 V1 source coverage includes requests and approvals, role-aware admin screens, wallet, payout retries, payment-link collections, customer-credit targets, and full-balance delivered-invoice A/R links. On `local_staging`, read-only ITC checks report migrations 145–149 applied and accounts 1100 and 2020 active/postable. The PawaPay sandbox account identity/version is bound in Expense Warrior and the account was read as `READY`; Expense Warrior may not treat its local balance as authoritative.
 
