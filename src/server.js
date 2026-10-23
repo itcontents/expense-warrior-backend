@@ -36,6 +36,7 @@ function startServer() {
   })
   const phoneVault = createPhoneVault(config.payoutDestinations)
   const app = createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault,
+    commerceReceivablesEnabled: config.itc.commerceReceivablesEnabled,
     callbackInboxEnabled: config.pawaPay.callbackInboxEnabled,
     collectionPaymentsEnabled: config.pawaPay.collectionsEnabled,
     staffPayoutsEnabled: config.pawaPay.payoutsEnabled,
