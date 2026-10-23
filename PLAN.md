@@ -11,7 +11,7 @@
 
 ## Latest repository and validation verification — 2026-10-23 (refreshed)
 
-- Expense Warrior API is on existing `staging` with the latest release-readiness record at `cb7493f`; frontend is on existing `main` at `fa970af`; ITC is on existing `production` at `c8a125a`. No branch was created or push made. Preserve the untracked API `tsconfig.json`.
+- Expense Warrior API is on existing `staging` with the latest QA record at `cb7493f`; frontend is on existing `main` at `fa970af`; ITC `production` is now at `fcc6c63` and includes the balance fix from `c8a125a`. No branch was created or push made. Preserve the untracked API `tsconfig.json`.
 - Fresh validation: API `npm test` passed 399 with 4 PostgreSQL-gated skips; frontend `npm test` passed 70/70 and `npm run build` passed; focused ITC `expenseWarriorFinanceService` tests passed 27/27. API/ITC local readiness endpoints returned HTTP 200 on ports 3100/3002.
 - The Admin browser pass confirmed sign-in/sign-out, balance loads, revenue account loading, and payment-link capability loading at 390×844. ITC ledger balance/history returned HTTP 200 after the zero-hold normalization and local-staging API restart.
 - Payment-link A/R is gated by `ITC_COMMERCE_RECEIVABLES_ENABLED`, default false. Disabled A/R does not call ITC or persist a link. ITC's current production policy still defers A/R; keep it disabled.
