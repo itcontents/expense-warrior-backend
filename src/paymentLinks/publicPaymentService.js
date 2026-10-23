@@ -11,26 +11,114 @@ const RECEIPT_NETWORKS = Object.freeze({
   MTN_MOMO_ZMB: 'MTN Mobile Money',
   ZAMTEL_ZMB: 'Zamtel Kwacha',
 })
-const isReceivableLink = (link) => link?.collection_target_type === 'AR_SETTLEMENT'
+const isArLink = (link) => link?.collection_target_type === 'AR_SETTLEMENT'
+const requiresCollectionPreflight = (link) =>
+  link?.collection_target_type === 'REVENUE' || link?.collection_target_type === 'CUSTOMER_CREDIT'
 const supportsPublicPhonePrompt = (network) =>
   network?.auth_type === 'PROVIDER_AUTH' && network?.pin_prompt === 'AUTOMATIC'
 
-async function reserveReceivableAttempt(itcFinanceClient, link, attempt) {
-  if (!isReceivableLink(link)) return true
+async function preflightCollectionAttempt(itcFinanceClient, link, attempt) {
+  const target = link.collection_target_type === 'REVENUE'
+    ? { type: 'REVENUE', revenue_account_code: link.revenue_account_code }
+    : { type: 'CUSTOMER_CREDIT', customer_id: link.customer_id }
+  const result = await itcFinanceClient.preflightCollectionTarget({
+    payment_link_id: attempt.payment_link_id || link.payment_link_id,
+    collection_attempt_id: attempt.attempt_id,
+    actor_customer_id: link.created_by_customer_id,
+    provider_code: attempt.provider_code,
+    provider_account_id: attempt.provider_account_id,
+    provider_account_version: attempt.provider_account_version,
+    target,
+  }, `ew-preflight-${attempt.attempt_id}`, attempt.attempt_id)
+  if (result?.ready !== true) {
+    throw new PaymentLinkError('ITC_COLLECTION_PREFLIGHT_NOT_READY', 502)
+  }
+}
+
+function receivableReservationKey(attemptId) { return `ew-ar-reserve-${attemptId}` }
+function receivableReleaseKey(attemptId) { return `ew-ar-release-${attemptId}` }
+
+async function reserveReceivableAttempt(repository, itcFinanceClient, link, attempt) {
   if (!itcFinanceClient || typeof itcFinanceClient.reserveCustomerReceivablePayment !== 'function' ||
-      !UUID.test(String(link.receivable_id || '')) || !UUID.test(String(link.customer_id || '')) ||
-      !UUID.test(String(link.created_by_customer_id || ''))) return false
-  const result = await itcFinanceClient.reserveCustomerReceivablePayment({
-    reservation_id: attempt.attempt_id,
-    payment_link_id: link.payment_link_id,
+      !UUID.test(String(link.customer_id || '')) || !UUID.test(String(link.receivable_id || '')) ||
+      !UUID.test(String(link.created_by_customer_id || '')) || !UUID.test(String(attempt.payment_link_id || link.payment_link_id || '')) ||
+      !UUID.test(String(attempt.attempt_id || ''))) {
+    await repository.updateAttempt(attempt.attempt_id, { state: 'FAILED', providerStatus: 'ITC_RESERVATION_REJECTED', errorCode: 'ITC_FINANCE_UNAVAILABLE' })
+    await repository.updateReceivableReservationState(attempt.attempt_id, 'RELEASED')
+    return { terminal: true }
+  }
+  const payload = {
+    reservation_id: attempt.receivable_reservation_id || attempt.attempt_id,
+    payment_link_id: attempt.payment_link_id || link.payment_link_id,
     collection_attempt_id: attempt.attempt_id,
     actor_customer_id: link.created_by_customer_id,
     customer_id: link.customer_id,
     receivable_id: link.receivable_id,
     amount: attempt.amount,
     currency: attempt.currency,
-  }, `ew-ar-reserve-${attempt.attempt_id}`, attempt.attempt_id)
-  return result?.reservation?.state === 'ACTIVE'
+  }
+  try {
+    const result = await itcFinanceClient.reserveCustomerReceivablePayment(payload, receivableReservationKey(attempt.attempt_id), attempt.attempt_id)
+    const reservation = result?.reservation
+    if (!reservation || reservation.state !== 'ACTIVE' ||
+        String(reservation.reservation_id).toLowerCase() !== payload.reservation_id.toLowerCase() ||
+        String(reservation.receivable_id).toLowerCase() !== payload.receivable_id.toLowerCase() ||
+        String(reservation.collection_attempt_id).toLowerCase() !== payload.collection_attempt_id.toLowerCase() ||
+        reservation.amount !== payload.amount || reservation.currency_code !== 'ZMW') {
+      await repository.updateReceivableReservationState(attempt.attempt_id, 'UNKNOWN')
+      await repository.updateAttempt(attempt.attempt_id, { state: 'UNKNOWN', providerStatus: 'ITC_RESERVATION_UNKNOWN', errorCode: 'ITC_RESERVATION_RESPONSE_INVALID' })
+      return { terminal: false }
+    }
+    await repository.updateReceivableReservationState(attempt.attempt_id, 'ACTIVE')
+    return { terminal: false, active: true }
+  } catch (error) {
+    const knownFailure = ['RECEIVABLE_NOT_FULL_BALANCE_ELIGIBLE', 'RECEIVABLE_ALREADY_RESERVED',
+      'COLLECTION_ATTEMPT_ALREADY_RESERVED', 'IDEMPOTENCY_CONFLICT', 'INVALID_RECEIVABLE_RESERVATION',
+      'ADMIN_IDENTITY_UNAVAILABLE'].includes(error?.code)
+    await repository.updateReceivableReservationState(attempt.attempt_id, knownFailure ? 'RELEASED' : 'UNKNOWN')
+    if (knownFailure) {
+      await repository.updateAttempt(attempt.attempt_id, { state: 'FAILED', providerStatus: 'ITC_RESERVATION_REJECTED', errorCode: error.code })
+      return { terminal: true }
+    }
+    await repository.updateAttempt(attempt.attempt_id, { state: 'UNKNOWN', providerStatus: 'ITC_RESERVATION_UNKNOWN', errorCode: 'ITC_RESERVATION_UNAVAILABLE' })
+    return { terminal: false }
+  }
+}
+
+async function releaseReceivableAttempt(repository, itcFinanceClient, link, attempt, terminalEvidence) {
+  if (!itcFinanceClient || typeof itcFinanceClient.releaseCustomerReceivablePayment !== 'function' ||
+      !UUID.test(String(attempt.receivable_reservation_id || attempt.attempt_id)) ||
+      !UUID.test(String(link.created_by_customer_id || ''))) {
+    await repository.updateReceivableReservationState(attempt.attempt_id, 'UNKNOWN')
+    return false
+  }
+  const outcome = String(terminalEvidence?.outcome || '')
+  const reasonCode = outcome === 'REJECTED' ? 'PROVIDER_REJECTED' : 'PROVIDER_FAILED'
+  const evidenceDigest = sha256(JSON.stringify([
+    attempt.provider_code, attempt.provider_transaction_id, outcome,
+    terminalEvidence?.provider_status || '', terminalEvidence?.rejection_code || '',
+  ]))
+  const payload = {
+    operation_id: attempt.attempt_id,
+    actor_customer_id: link.created_by_customer_id,
+    reason_code: reasonCode,
+    reason: `${attempt.provider_code} deposit reached terminal ${outcome.toLowerCase()} status`,
+    evidence_digest: evidenceDigest,
+  }
+  try {
+    const result = await itcFinanceClient.releaseCustomerReceivablePayment(
+      attempt.receivable_reservation_id || attempt.attempt_id, payload,
+      receivableReleaseKey(attempt.attempt_id), attempt.attempt_id,
+    )
+    if (result?.reservation?.state !== 'RELEASED') throw new Error('Reservation release was not confirmed')
+    await repository.updateReceivableReservationState(attempt.attempt_id, 'RELEASED')
+    await repository.updateAttempt(attempt.attempt_id, { state: 'FAILED', providerStatus: terminalEvidence.provider_status || outcome, errorCode: reasonCode })
+    return true
+  } catch (_error) {
+    await repository.updateReceivableReservationState(attempt.attempt_id, 'UNKNOWN')
+    await repository.updateAttempt(attempt.attempt_id, { state: 'UNKNOWN', providerStatus: terminalEvidence.provider_status || outcome, errorCode: 'ITC_RESERVATION_RELEASE_PENDING' })
+    return false
+  }
 }
 
 function toPublicAttempt(attempt) {
@@ -132,10 +220,7 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         const existing = await repository.getAttemptByIdempotency(tokenHash, idempotencyKey)
         if (existing) {
           if (existing.request_fingerprint !== requestFingerprint) throw new PaymentLinkError('IDEMPOTENCY_CONFLICT', 409)
-          const shouldResumeArReservation = isReceivableLink(existing) &&
-            ['SUBMITTING', 'UNKNOWN'].includes(existing.state) &&
-            ['ITC_RESERVATION_UNKNOWN', 'ITC_RESERVATION_PENDING'].includes(existing.provider_status)
-          if (!shouldResumeArReservation) return { attempt: toPublicAttempt(existing), replayed: true }
+          return { attempt: toPublicAttempt(existing), replayed: true }
         }
       }
       const link = await repository.getPublicLink(tokenHash)
@@ -166,23 +251,32 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
         providerAccountId: providerAccountIdentity?.provider_account_id || null,
         providerAccountVersion: providerAccountIdentity?.provider_account_version || null,
       })
-      const shouldResumeArReservation = prepared.replayed && isReceivableLink(prepared.link) &&
-        ['SUBMITTING', 'UNKNOWN'].includes(prepared.attempt.state) &&
-        ['ITC_RESERVATION_UNKNOWN', 'ITC_RESERVATION_PENDING'].includes(prepared.attempt.provider_status)
-      if (prepared.replayed && !shouldResumeArReservation) return { attempt: toPublicAttempt(prepared.attempt), replayed: true }
+      if (prepared.replayed) return { attempt: toPublicAttempt(prepared.attempt), replayed: true }
 
-      if (isReceivableLink(prepared.link)) {
+      if (requiresCollectionPreflight(prepared.link)) {
         try {
-          const reserved = await reserveReceivableAttempt(itcFinanceClient, prepared.link, prepared.attempt)
-          if (!reserved) throw new PaymentLinkError('RECEIVABLE_RESERVATION_INVALID', 409)
+          if (typeof itcFinanceClient?.preflightCollectionTarget !== 'function') {
+            throw new PaymentLinkError('ITC_FINANCE_UNAVAILABLE', 503)
+          }
+          await preflightCollectionAttempt(itcFinanceClient, prepared.link, prepared.attempt)
         } catch (error) {
-          const uncertain = error?.statusCode >= 500 || ['ITC_FINANCE_UNAVAILABLE', 'ITC_FINANCE_RESPONSE_INVALID'].includes(error?.code)
+          const errorCode = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || ''))
+            ? error.code
+            : 'ITC_COLLECTION_PREFLIGHT_FAILED'
           const attempt = await repository.updateAttempt(prepared.attempt.attempt_id, {
-            state: uncertain ? 'UNKNOWN' : 'FAILED',
-            providerStatus: uncertain ? 'ITC_RESERVATION_UNKNOWN' : 'ITC_RESERVATION_REJECTED',
-            errorCode: /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'RECEIVABLE_RESERVATION_UNAVAILABLE',
+            state: 'FAILED',
+            providerStatus: 'ITC_PREFLIGHT_REJECTED',
+            errorCode,
           })
           return { attempt: toPublicAttempt(attempt), replayed: prepared.replayed }
+        }
+      }
+
+      if (isArLink(prepared.link)) {
+        const reservation = await reserveReceivableAttempt(repository, itcFinanceClient, prepared.link, prepared.attempt)
+        if (!reservation.active) {
+          const current = await repository.getPublicAttempt(tokenHash, prepared.attempt.attempt_id)
+          return { attempt: toPublicAttempt(current || prepared.attempt), replayed: false }
         }
       }
 
@@ -204,53 +298,26 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
             state: 'UNKNOWN', providerStatus: response?.provider_status || response?.outcome || 'INVALID_RESPONSE', errorCode: 'PROVIDER_RESPONSE_INVALID',
           })
         } else {
-          if (response.outcome === 'REJECTED' && isReceivableLink(prepared.link)) {
-            try {
-              await releaseFailedArReservation(itcFinanceClient, { ...prepared.attempt, ...prepared.link }, {
-                outcome: response.outcome, providerStatus: response.provider_status, rejectionCode: response.rejection_code,
-              })
-              updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-                state: 'FAILED', providerStatus: response.provider_status || response.outcome,
-                providerReference: response.rejection_code || null, errorCode: 'PROVIDER_REJECTED',
-              })
-            } catch (_releaseError) {
-              updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-                state: 'UNKNOWN', providerStatus: response.provider_status || response.outcome,
-                providerReference: response.rejection_code || null, errorCode: 'RESERVATION_RELEASE_PENDING',
-              })
-            }
-          } else {
-            updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-              state: response.outcome === 'REJECTED' ? 'FAILED' : 'PENDING',
-              providerStatus: response.provider_status || response.outcome,
-              providerReference: response.rejection_code || null,
-              errorCode: response.outcome === 'REJECTED' ? 'PROVIDER_REJECTED' : null,
-            })
-          }
-        }
-      } catch (error) {
-        if (isReceivableLink(prepared.link) && !error?.outcomeUnknown) {
-          try {
-            await releaseFailedArReservation(itcFinanceClient, { ...prepared.attempt, ...prepared.link }, {
-              outcome: 'FAILED',
-              providerStatus: error?.providerStatus || null,
-            })
-            updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-              state: 'FAILED', providerStatus: 'FAILED',
-              errorCode: /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'PROVIDER_UNAVAILABLE',
-            })
-          } catch (_releaseError) {
-            updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-              state: 'UNKNOWN', providerStatus: 'FAILED', errorCode: 'RESERVATION_RELEASE_PENDING',
-            })
-          }
-        } else {
           updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
-            state: error?.outcomeUnknown ? 'UNKNOWN' : 'FAILED',
-            providerStatus: error?.outcomeUnknown ? 'OUTCOME_UNKNOWN' : null,
-            errorCode: /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'PROVIDER_UNAVAILABLE',
+            state: response.outcome === 'REJECTED' ? 'FAILED' : 'PENDING',
+            providerStatus: response.provider_status || response.outcome,
+            providerReference: response.rejection_code || null,
+            errorCode: response.outcome === 'REJECTED' ? 'PROVIDER_REJECTED' : null,
           })
         }
+      } catch (error) {
+        updated = await repository.updateAttempt(prepared.attempt.attempt_id, {
+          state: error?.outcomeUnknown ? 'UNKNOWN' : 'FAILED',
+          providerStatus: error?.outcomeUnknown ? 'OUTCOME_UNKNOWN' : null,
+          errorCode: /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'PROVIDER_UNAVAILABLE',
+        })
+      }
+      if (isArLink(prepared.link) && updated.state === 'FAILED') {
+        await releaseReceivableAttempt(repository, itcFinanceClient, prepared.link, {
+          ...prepared.attempt, ...updated,
+          receivable_reservation_id: prepared.attempt.receivable_reservation_id || prepared.attempt.attempt_id,
+        }, { outcome: 'REJECTED', provider_status: updated.provider_status, rejection_code: updated.error_code })
+        updated = await repository.getPublicAttempt(tokenHash, prepared.attempt.attempt_id) || updated
       }
       return { attempt: toPublicAttempt(updated), replayed: false }
     },
@@ -263,6 +330,55 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       const attempt = await repository.getPublicAttempt(tokenHash, attemptId)
       if (!attempt) throw new PaymentLinkError('PAYMENT_ATTEMPT_NOT_FOUND', 404)
       if (['FAILED', 'SUCCEEDED'].includes(attempt.state)) return toPublicAttempt(attempt)
+      if (isArLink(attempt) && attempt.receivable_reservation_state !== 'RELEASED' &&
+          ['FAILED', 'CANCELLED', 'REJECTED'].includes(String(attempt.provider_status || '').toUpperCase())) {
+        await releaseReceivableAttempt(repository, itcFinanceClient, { created_by_customer_id: attempt.created_by_customer_id }, attempt, {
+          outcome: String(attempt.provider_status).toUpperCase(), provider_status: attempt.provider_status,
+          rejection_code: attempt.provider_reference,
+        })
+        return toPublicAttempt(await repository.getPublicAttempt(tokenHash, attempt.attempt_id) || attempt)
+      }
+      if (isArLink(attempt) && attempt.receivable_reservation_state !== 'ACTIVE' && attempt.state !== 'VERIFIED_PENDING_LEDGER') {
+        const link = {
+          payment_link_id: attempt.payment_link_id,
+          collection_target_type: attempt.collection_target_type,
+          customer_id: attempt.customer_id,
+          receivable_id: attempt.receivable_id,
+          created_by_customer_id: attempt.created_by_customer_id,
+        }
+        const reservation = await reserveReceivableAttempt(repository, itcFinanceClient, link, attempt)
+        if (reservation.terminal || !reservation.active) {
+          return toPublicAttempt(await repository.getPublicAttempt(tokenHash, attempt.attempt_id) || attempt)
+        }
+        const existingStatus = String(attempt.provider_status || '').toUpperCase()
+        if (['FAILED', 'CANCELLED', 'REJECTED'].includes(existingStatus)) {
+          await releaseReceivableAttempt(repository, itcFinanceClient, link, attempt, { outcome: existingStatus, provider_status: existingStatus })
+          return toPublicAttempt(await repository.getPublicAttempt(tokenHash, attempt.attempt_id) || attempt)
+        }
+        const selectedNetwork = await getUniqueNetwork(providerRegistry, attempt.provider_code, attempt.network_code, attempt)
+        const provider = getProviderForOperation(providerRegistry, attempt.provider_code, 'deposit', {
+          provider_account_id: attempt.provider_account_id, provider_account_version: attempt.provider_account_version,
+        })
+        if (!selectedNetwork || !provider) throw new PaymentLinkError('PAYMENT_PROVIDER_UNAVAILABLE', 503)
+        try {
+          const response = await provider.initiateDeposit({
+            transaction_id: attempt.provider_transaction_id, country: 'ZMB', currency: attempt.currency,
+            amount: providerAmount(attempt.amount, selectedNetwork), phone_number: attempt.payer_phone,
+            network_code: attempt.network_code, client_reference: `EW-${attempt.attempt_id}`, customer_message: 'EW petty cash',
+          })
+          const submitted = await repository.updateAttempt(attempt.attempt_id, {
+            state: response?.outcome === 'REJECTED' ? 'FAILED' : ['ACCEPTED', 'DUPLICATE'].includes(response?.outcome) ? 'PENDING' : 'UNKNOWN',
+            providerStatus: response?.provider_status || response?.outcome || 'INVALID_RESPONSE',
+            providerReference: response?.rejection_code || null,
+            errorCode: response?.outcome === 'REJECTED' ? 'PROVIDER_REJECTED' : null,
+          })
+          if (submitted.state === 'FAILED') await releaseReceivableAttempt(repository, itcFinanceClient, link, attempt, { outcome: 'REJECTED', provider_status: submitted.provider_status, rejection_code: submitted.provider_reference })
+          return toPublicAttempt(await repository.getPublicAttempt(tokenHash, attempt.attempt_id) || submitted)
+        } catch (_error) {
+          const unknown = await repository.updateAttempt(attempt.attempt_id, { state: 'UNKNOWN', providerStatus: 'OUTCOME_UNKNOWN', errorCode: 'PROVIDER_UNAVAILABLE' })
+          return toPublicAttempt(unknown)
+        }
+      }
       if (attempt.state === 'VERIFIED_PENDING_LEDGER' && attempt.provider_evidence_digest) {
         return toPublicAttempt(await postConfirmedCollection(repository, itcFinanceClient, attempt))
       }
@@ -287,16 +403,10 @@ function createPublicPaymentService({ repository, providerRegistry, itcFinanceCl
       }
       if (['FAILED', 'CANCELLED'].includes(providerTransaction.outcome)) {
         if (attempt.state === 'VERIFIED_PENDING_LEDGER') return toPublicAttempt(attempt)
-        if (isReceivableLink(attempt)) {
-          try {
-            await releaseFailedArReservation(itcFinanceClient, attempt, {
-              outcome: providerTransaction.outcome, providerStatus: status,
-              rejectionCode: providerTransaction.rejection_code,
-            })
-            return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, { state: 'FAILED', providerStatus: status, errorCode: status }))
-          } catch (_releaseError) {
-            return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, { state: 'UNKNOWN', providerStatus: status, errorCode: 'RESERVATION_RELEASE_PENDING' }))
-          }
+        if (isArLink(attempt)) {
+          const link = { created_by_customer_id: attempt.created_by_customer_id }
+          await releaseReceivableAttempt(repository, itcFinanceClient, link, attempt, { outcome: providerTransaction.outcome, provider_status: status })
+          return toPublicAttempt(await repository.getPublicAttempt(tokenHash, attempt.attempt_id) || attempt)
         }
         return toPublicAttempt(await repository.updateAttempt(attempt.attempt_id, { state: 'FAILED', providerStatus: status, errorCode: status }))
       }
@@ -400,17 +510,22 @@ async function postConfirmedCollection(repository, itcFinanceClient, attempt) {
   let result
   try {
     if (attempt.collection_target_type === 'REVENUE' && /^\d{4}$/.test(String(attempt.revenue_account_code || ''))) {
-      result = await itcFinanceClient.postEarnedRevenueCollection({ ...payload, revenue_account_code: attempt.revenue_account_code }, idempotencyKey)
+      result = await itcFinanceClient.postEarnedRevenueCollection({
+        ...payload, target: { type: 'REVENUE', revenue_account_code: attempt.revenue_account_code },
+      }, idempotencyKey)
     } else if (attempt.collection_target_type === 'CUSTOMER_CREDIT' && UUID.test(String(attempt.customer_id || ''))) {
-      result = await itcFinanceClient.creditCustomerAccount({ ...payload, customer_id: attempt.customer_id }, idempotencyKey)
-    } else if (attempt.collection_target_type === 'AR_SETTLEMENT' && UUID.test(String(attempt.receivable_id || '')) &&
-        UUID.test(String(attempt.customer_id || ''))) {
+      result = await itcFinanceClient.creditCustomerAccount({
+        ...payload, target: { type: 'CUSTOMER_CREDIT', customer_id: attempt.customer_id },
+      }, idempotencyKey)
+    } else if (attempt.collection_target_type === 'AR_SETTLEMENT' &&
+        UUID.test(String(attempt.customer_id || '')) && UUID.test(String(attempt.receivable_id || '')) &&
+        UUID.test(String(attempt.receivable_reservation_id || attempt.attempt_id)) && attempt.receivable_reservation_state === 'ACTIVE') {
       result = await itcFinanceClient.applyCustomerReceivablePayment({
-        ...payload,
-        customer_id: attempt.customer_id,
-        receivable_id: attempt.receivable_id,
-        reservation_id: attempt.attempt_id,
-      }, idempotencyKey, attempt.attempt_id)
+        ...payload, target: {
+          type: 'AR_SETTLEMENT', customer_id: attempt.customer_id,
+          receivable_id: attempt.receivable_id, reservation_id: attempt.receivable_reservation_id || attempt.attempt_id,
+        },
+      }, idempotencyKey)
     } else {
       return attempt
     }
@@ -420,30 +535,6 @@ async function postConfirmedCollection(repository, itcFinanceClient, attempt) {
   const operationId = result?.operation?.operation_id
   if (!UUID.test(String(operationId || ''))) return attempt
   return repository.markAttemptSucceeded(attempt.attempt_id, operationId)
-}
-
-async function releaseFailedArReservation(itcFinanceClient, attempt, evidence) {
-  if (attempt.collection_target_type !== 'AR_SETTLEMENT' || !itcFinanceClient ||
-      typeof itcFinanceClient.releaseCustomerReceivablePayment !== 'function' ||
-      !UUID.test(String(attempt.attempt_id || '')) || !UUID.test(String(attempt.created_by_customer_id || ''))) return false
-  const outcome = String(evidence?.outcome || '').toUpperCase()
-  if (!['REJECTED', 'FAILED', 'CANCELLED'].includes(outcome)) return false
-  const evidenceDigest = sha256(JSON.stringify([
-    attempt.provider_transaction_id,
-    outcome,
-    evidence.providerStatus || null,
-    evidence.rejectionCode || null,
-  ]))
-  const reasonCode = outcome === 'REJECTED' ? 'PROVIDER_REJECTED' : 'PROVIDER_FAILED'
-  const idempotencyKey = `ew-ar-release-${attempt.attempt_id}`
-  await itcFinanceClient.releaseCustomerReceivablePayment(attempt.attempt_id, {
-    operation_id: attempt.attempt_id,
-    actor_customer_id: attempt.created_by_customer_id,
-    reason_code: reasonCode,
-    reason: `Collection provider ended with ${outcome}`,
-    evidence_digest: evidenceDigest,
-  }, idempotencyKey, attempt.attempt_id)
-  return true
 }
 
 module.exports = { createPublicPaymentService, toPublicAttempt, postConfirmedCollection }

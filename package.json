@@ -11,7 +11,11 @@
     "dev": "node --watch src/server.js",
     "test": "node --test",
     "test:postgres": "EW_RUN_POSTGRES_TESTS=1 node --test tests/requestRepository.postgres.test.js tests/approvalPayoutRepository.postgres.test.js tests/paymentLinkRepository.postgres.test.js tests/managerAssignmentRepository.postgres.test.js",
-    "db:migrate": "node src/db/migrate.js"
+    "db:migrate": "node src/db/migrate.js apply",
+    "db:migrate:apply": "node src/db/migrate.js apply",
+    "db:migrate:status": "node src/db/migrate.js status",
+    "db:migrate:plan": "node src/db/migrate.js plan",
+    "db:migrate:verify": "node src/db/migrate.js verify"
   },
   "dependencies": {
     "cloudinary": "^2.11.0",

@@ -13,6 +13,7 @@ const TABLES = Object.freeze([
   'payment_links',
   'payment_link_creation_requests',
   'payment_link_attempts',
+  'payment_link_receivable_closures',
   'audit_events',
 ])
 
@@ -124,39 +125,10 @@ test('payment-link repository persists idempotent links and verified collections
     assert.equal(distinctPayment.attempt.network_code, attemptInput.networkCode,
       'different providers may safely use the same network code')
 
-    const customerId = randomUUID()
-    const receivableId = randomUUID()
-    const arLinkInputs = [0, 1].map((index) => ({
-      ...linkInput,
-      amount: '120.00',
-      description: `A/R PostgreSQL collection test ${index}`,
-      target: { type: 'AR_SETTLEMENT', customerId, receivableId },
-      tokenHash: String(index + 2).repeat(64),
-      requestFingerprint: String(index + 2).repeat(64),
-      idempotencyKey: randomUUID(),
-    }))
-    const arLinks = await Promise.all(arLinkInputs.map((entry) => repository.create(entry)))
-    const arAttempt = await repository.createAttempt({
-      ...attemptInput,
-      attemptId: randomUUID(),
-      tokenHash: arLinkInputs[0].tokenHash,
-      idempotencyKey: randomUUID(),
-      requestFingerprint: '2'.repeat(64),
-    })
-    await repository.updateAttempt(arAttempt.attempt.attempt_id, {
-      state: 'VERIFIED_PENDING_LEDGER', providerStatus: 'COMPLETED', verified: true,
-    })
-    await repository.markAttemptSucceeded(arAttempt.attempt.attempt_id, randomUUID())
-    const arStates = await pool.query(`
-      SELECT status FROM payment_links WHERE payment_link_id = ANY($1::uuid[])
-    `, [arLinks.map(({ link }) => link.payment_link_id)])
-    assert.deepEqual(arStates.rows.map(({ status }) => status), ['DISABLED', 'DISABLED'],
-      'verified A/R collection must close every active link for the settled receivable')
-
     const audit = await pool.query(`SELECT count(*)::int AS count FROM audit_events`)
-    assert.equal(audit.rows[0].count, 5, 'creation replay must not duplicate the audit record; A/R closures are audited')
+    assert.equal(audit.rows[0].count, 1, 'creation replay must not duplicate the audit record')
     const attempts = await pool.query(`SELECT count(*)::int AS count FROM payment_link_attempts`)
-    assert.equal(attempts.rows[0].count, 3, 'attempt replay must not insert another provider attempt')
+    assert.equal(attempts.rows[0].count, 2, 'attempt replay must not insert another provider attempt')
 
     const persisted = await pool.query(`
       SELECT state, provider_code, network_code, provider_account_id, provider_account_version, ledger_operation_id
@@ -172,6 +144,46 @@ test('payment-link repository persists idempotent links and verified collections
     assert.equal(persistedByProvider.get('airtel_direct').provider_account_version, 5)
     const activeRevenueLink = await repository.getPublicLink(linkInput.tokenHash)
     assert.equal(activeRevenueLink.status, 'ACTIVE', 'revenue payment links remain reusable after a successful collection')
+
+    const receivableId = randomUUID()
+    const arLinkInput = {
+      ...linkInput, amount: '125.00', description: 'Credit invoice test', tokenHash: 'e'.repeat(64),
+      requestFingerprint: '2'.repeat(64), idempotencyKey: randomUUID(),
+      target: { type: 'AR_SETTLEMENT', customerId: actorCustomerId, receivableId },
+    }
+    const arLink = await repository.create(arLinkInput)
+    const secondArLinkInput = { ...arLinkInput, tokenHash: 'f'.repeat(64), idempotencyKey: randomUUID(), requestFingerprint: '5'.repeat(64) }
+    await repository.create(secondArLinkInput)
+    const arAttemptId = randomUUID()
+    const arAttempt = await repository.createAttempt({ ...attemptInput, attemptId: arAttemptId, tokenHash: arLinkInput.tokenHash, idempotencyKey: randomUUID(), requestFingerprint: '3'.repeat(64) })
+    assert.equal(arAttempt.attempt.receivable_reservation_id, arAttemptId)
+    assert.equal(arAttempt.attempt.receivable_reservation_state, 'PENDING')
+    await repository.updateReceivableReservationState(arAttemptId, 'ACTIVE')
+    await repository.updateAttempt(arAttemptId, { state: 'VERIFIED_PENDING_LEDGER', providerStatus: 'COMPLETED', verified: true, evidenceDigest: '4'.repeat(64) })
+    const arOperationId = randomUUID()
+    await repository.markAttemptSucceeded(arAttemptId, arOperationId)
+    await repository.markAttemptSucceeded(arAttemptId, arOperationId)
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM payment_link_receivable_closures WHERE receivable_id = $1', [receivableId])).rows[0].count, 2)
+    assert.equal(await repository.getPublicLink(arLinkInput.tokenHash), null, 'a settled receivable link must no longer accept payment')
+    assert.equal(await repository.getPublicLink(secondArLinkInput.tokenHash), null, 'every link for the settled invoice must be closed')
+
+    const lateArLinkInput = {
+      ...arLinkInput, tokenHash: '9'.repeat(64), requestFingerprint: '8'.repeat(64), idempotencyKey: randomUUID(),
+    }
+    const lateArLink = await repository.create(lateArLinkInput)
+    assert.equal(lateArLink.replayed, false)
+    assert.equal(await repository.getPublicLink(lateArLinkInput.tokenHash), null,
+      'a link created after settlement must still be unavailable')
+    await assert.rejects(
+      repository.createAttempt({
+        ...attemptInput, attemptId: randomUUID(), tokenHash: lateArLinkInput.tokenHash,
+        idempotencyKey: randomUUID(), requestFingerprint: '7'.repeat(64),
+      }),
+      (error) => error.code === 'PAYMENT_LINK_NOT_AVAILABLE',
+    )
+    const lateLinkHistory = await repository.list({ limit: 100, offset: 0 })
+    const lateLink = lateLinkHistory.items.find((item) => item.payment_link_id === lateArLink.link.payment_link_id)
+    assert.ok(lateLink?.settled_at, 'admin history must show the receivable settlement for a late-created link')
   } finally {
     await pool.end()
   }

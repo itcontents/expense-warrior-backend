@@ -80,6 +80,7 @@ function createAttachmentStorage({ cloudinary, fetchImpl = fetch, maxBytes = 5 *
           unique_filename: false,
           use_filename: false,
           format: signature.extension,
+          timeout: timeoutMs,
         }, (error, result) => error ? reject(error) : resolve(result))
         Readable.from([normalizedBuffer]).pipe(upload)
       })

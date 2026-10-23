@@ -110,6 +110,18 @@ test('payment-link repository rejects changed content for a reused key without c
   assert.equal(pool.state.auditEvents, 1)
 })
 
+test('payment-link repository persists an A/R target with customer and receivable identities', async () => {
+  const pool = createMemoryPool()
+  const repository = createPaymentLinkRepository({ pool })
+  const result = await repository.create({
+    ...input,
+    target: { type: 'AR_SETTLEMENT', customerId: '50000000-0000-4000-8000-000000000001', receivableId: '60000000-0000-4000-8000-000000000002' },
+  })
+  assert.equal(result.link.collection_target_type, 'AR_SETTLEMENT')
+  assert.equal(result.link.customer_id, '50000000-0000-4000-8000-000000000001')
+  assert.equal(result.link.receivable_id, '60000000-0000-4000-8000-000000000002')
+})
+
 test('payment-link repository finds an existing attempt by opaque link hash and idempotency key', async () => {
   const expected = {
     attempt_id: '11111111-1111-4111-8111-111111111111',

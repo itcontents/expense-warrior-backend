@@ -73,6 +73,14 @@ test('attachmentStorage_acceptsReencodedPngAndWebpImagesAsAuthenticatedAssets', 
   }
 })
 
+test('attachmentStorage_boundsCloudinaryUploadDuration', async () => {
+  const cloudinary = cloudinaryStub()
+  const storage = createAttachmentStorage({ cloudinary, timeoutMs: 1234 })
+  await storage.save({ mimetype: 'image/png', buffer: await createImage() })
+
+  assert.equal(cloudinary.calls.uploads[0].timeout, 1234)
+})
+
 test('attachmentStorage_rejectsMimetypeSpoofingAndOversizedImages', async () => {
   const storage = createAttachmentStorage({ cloudinary: cloudinaryStub() })
   await assert.rejects(storage.save({ mimetype: 'image/png', buffer: Buffer.from('not an image') }), (error) => error.code === 'UNSUPPORTED_IMAGE')

@@ -171,6 +171,7 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
       user: value.DB_MIGRATION_USER,
       password: value.DB_MIGRATION_PASSWORD,
       ssl: value.DB_SSL_MODE === 'disable' ? false : { rejectUnauthorized: true },
+      options: '-c search_path=public,pg_temp',
     }) : null,
     itc: Object.freeze({
       baseUrl: value.ITC_API_BASE_URL.replace(/\/+$/, ''),
@@ -210,4 +211,104 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
   })
 }
 
-module.exports = { loadConfig }
+function loadMigrationTargetConfig(source = process.env) {
+  const schema = Joi.object({
+    DB_MIGRATION_TARGET: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_ALLOWED_TARGETS: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_TARGETS_JSON: Joi.string().allow('').default(''),
+    DB_MIGRATION_TARGET_HOST: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_TARGET_PORT: Joi.number().integer().min(1).max(65535).required(),
+    DB_MIGRATION_TARGET_DATABASE: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_USER: Joi.string().trim().min(1).required(),
+    DB_MIGRATION_PASSWORD: Joi.string().min(1).required(),
+  }).unknown(true)
+  const { value, error } = schema.validate(source, { abortEarly: false, convert: true })
+  if (error) {
+    const failure = new Error('Migration target configuration is incomplete or invalid')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    failure.details = error.details.map((detail) => detail.path.join('.'))
+    throw failure
+  }
+
+  const allowedTargets = value.DB_MIGRATION_ALLOWED_TARGETS.split(',').map((target) => target.trim()).filter(Boolean)
+  if (new Set(allowedTargets).size !== allowedTargets.length) {
+    const failure = new Error('Migration target allowlist contains duplicate names')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    throw failure
+  }
+  if (!allowedTargets.includes(value.DB_MIGRATION_TARGET)) {
+    const failure = new Error('Selected migration target is not allowlisted')
+    failure.code = 'MIGRATION_TARGET_NOT_ALLOWLISTED'
+    throw failure
+  }
+  const isExpenseWarriorDatabase = (database) => /^expense_warrior(?:_[a-z0-9]+)*$/i.test(String(database || ''))
+  const isExpenseWarriorMigrationRole = (user) => String(user || '') === 'expense_warrior_migrator'
+  if (!isExpenseWarriorDatabase(value.DB_MIGRATION_TARGET_DATABASE) || !isExpenseWarriorMigrationRole(value.DB_MIGRATION_USER)) {
+    const failure = new Error('Migration targets must use the Expense Warrior database and dedicated migration role')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    failure.details = ['DB_MIGRATION_TARGET_DATABASE', 'DB_MIGRATION_USER']
+    throw failure
+  }
+  let targets = null
+  if (value.DB_MIGRATION_TARGETS_JSON) {
+    try {
+      targets = JSON.parse(value.DB_MIGRATION_TARGETS_JSON)
+    } catch {
+      const failure = new Error('Migration target map is invalid')
+      failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+      throw failure
+    }
+    if (!targets || Array.isArray(targets) || typeof targets !== 'object') {
+      const failure = new Error('Migration target map is invalid')
+      failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+      throw failure
+    }
+  } else if (allowedTargets.length > 1) {
+    const failure = new Error('A target identity map is required when multiple targets are allowlisted')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    throw failure
+  }
+  if (targets) {
+    for (const name of allowedTargets) {
+      const configured = targets[name]
+      if (!configured || typeof configured.host !== 'string' || !configured.host.trim() ||
+          !Number.isInteger(Number(configured.port)) || Number(configured.port) < 1 || Number(configured.port) > 65535 ||
+          typeof configured.database !== 'string' || !configured.database.trim() ||
+          typeof configured.user !== 'string' || !configured.user.trim()) {
+        const failure = new Error('Every allowlisted migration target needs a complete identity map')
+        failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+        throw failure
+      }
+      if (!isExpenseWarriorDatabase(configured.database) || !isExpenseWarriorMigrationRole(configured.user)) {
+        const failure = new Error('Every allowlisted target must use an Expense Warrior database and migration role')
+        failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+        throw failure
+      }
+    }
+    const mapped = targets[value.DB_MIGRATION_TARGET]
+    if (mapped.host !== value.DB_MIGRATION_TARGET_HOST || Number(mapped.port) !== value.DB_MIGRATION_TARGET_PORT ||
+        mapped.database !== value.DB_MIGRATION_TARGET_DATABASE || mapped.user !== value.DB_MIGRATION_USER) {
+      const failure = new Error('Selected migration target tuple does not match its allowlisted identity')
+      failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+      throw failure
+    }
+  }
+  if (source.DB_USER && value.DB_MIGRATION_USER === source.DB_USER) {
+    const failure = new Error('Migration database identity must differ from the runtime application identity')
+    failure.code = 'MIGRATION_TARGET_CONFIG_INVALID'
+    failure.details = ['DB_MIGRATION_USER']
+    throw failure
+  }
+
+  return Object.freeze({
+    name: value.DB_MIGRATION_TARGET,
+    host: value.DB_MIGRATION_TARGET_HOST,
+    port: value.DB_MIGRATION_TARGET_PORT,
+    database: value.DB_MIGRATION_TARGET_DATABASE,
+    user: value.DB_MIGRATION_USER,
+    schema: 'public',
+    searchPath: 'public, pg_temp',
+  })
+}
+
+module.exports = { loadConfig, loadMigrationTargetConfig }

@@ -202,7 +202,7 @@ class ItcFinanceClient {
           typeof row.invoice_number !== 'string' || row.invoice_number.length < 1 || row.invoice_number.length > 120 ||
           !MONEY_PATTERN.test(String(row.original_amount || '')) || !MONEY_PATTERN.test(String(row.applied_amount || '')) ||
           !MONEY_PATTERN.test(String(row.outstanding_amount || '')) || row.currency !== 'ZMW' ||
-          !['OPEN', 'PARTIALLY_PAID'].includes(row.status) || !Number.isFinite(Date.parse(row.issued_at)))) {
+          !['OPEN', 'PARTIALLY_PAID', 'PARTIALLY_CREDITED'].includes(row.status) || !Number.isFinite(Date.parse(row.issued_at)))) {
       throw new ItcFinanceError('ITC_FINANCE_RESPONSE_INVALID', 502)
     }
     return result
@@ -219,7 +219,7 @@ class ItcFinanceClient {
         row.customer_id?.toLowerCase() !== customerId.toLowerCase() ||
         !UUID_PATTERN.test(String(row.order_id || '')) || typeof row.invoice_number !== 'string' ||
         !MONEY_PATTERN.test(String(row.outstanding_amount || '')) || row.currency !== 'ZMW' ||
-        !['OPEN', 'PARTIALLY_PAID'].includes(row.status) || !Number.isFinite(Date.parse(row.issued_at))) {
+        !['OPEN', 'PARTIALLY_PAID', 'PARTIALLY_CREDITED'].includes(row.status) || !Number.isFinite(Date.parse(row.issued_at))) {
       throw new ItcFinanceError('ITC_FINANCE_RESPONSE_INVALID', 502)
     }
     return row
@@ -281,6 +281,12 @@ class ItcFinanceClient {
 
   async postEarnedRevenueCollection(payload, idempotencyKey, requestId) {
     return this.#postCollection('/internal/expense-warrior/collections/revenue', payload, idempotencyKey, requestId)
+  }
+
+  async preflightCollectionTarget(payload, idempotencyKey, requestId) {
+    const data = await this.#request('POST', '/internal/expense-warrior/collections/preflight', { payload, idempotencyKey, requestId })
+    if (data.ready !== true) throw new ItcFinanceError('ITC_FINANCE_RESPONSE_INVALID', 502)
+    return { ready: true }
   }
 
   async #postCollection(path, payload, idempotencyKey, requestId) {
