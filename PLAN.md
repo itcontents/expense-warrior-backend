@@ -9,7 +9,17 @@
 - Local PawaPay collection, payout, and callback-inbox flags are enabled for sandbox development. ITC's standard local API on port 3000 remains pointed at `itc`; a separate isolated ITC process on port 3002 targets `local_staging` for the owner's requested integration environment. The Expense Warrior frontend proxy and API target that isolated process; the API is ready on 3100. No signed finance request was made because accepted HMAC requests persist a replay nonce. No payment, payout, refund, posting, migration, or persistent business-data write was performed.
 - Merchant-account callback delivery remains unverified. ITC payment workers and collection-refund processing remain disabled. Production provider readiness and deployment are separate, incomplete gates.
 
-## Latest repository and validation verification — 2026-10-23
+## Latest repository and validation verification — 2026-10-23 (refreshed)
+
+- Expense Warrior API is on existing `staging` with the latest release-readiness record at `cb7493f`; frontend is on existing `main` at `fa970af`; ITC is on existing `production` at `c8a125a`. No branch was created or push made. Preserve the untracked API `tsconfig.json`.
+- Fresh validation: API `npm test` passed 399 with 4 PostgreSQL-gated skips; frontend `npm test` passed 70/70 and `npm run build` passed; focused ITC `expenseWarriorFinanceService` tests passed 27/27. API/ITC local readiness endpoints returned HTTP 200 on ports 3100/3002.
+- The Admin browser pass confirmed sign-in/sign-out, balance loads, revenue account loading, and payment-link capability loading at 390×844. ITC ledger balance/history returned HTTP 200 after the zero-hold normalization and local-staging API restart.
+- Payment-link A/R is gated by `ITC_COMMERCE_RECEIVABLES_ENABLED`, default false. Disabled A/R does not call ITC or persist a link. ITC's current production policy still defers A/R; keep it disabled.
+- Online staging audit through `node scripts/codex_db.js staging` as `shopit_accounting_audit` found only migration 144 recorded among 134–149. Finance operations, fund holds, service nonces, nonce-claim function, and collection operations are absent. ITC must provide a reviewed target-specific migration plan; no staging migration was run.
+- PawaPay feature flags are true in local `.env`, but merchant-level signed-only enforcement and callback delivery remain unverified. No signed finance request, provider transaction, migration, export, or persistent business-data write occurred.
+- Remaining end-to-end gates: all 36 category-to-OPEX mappings are unset; no eligible staff/manager candidates, payout destinations, or manager assignments were available; populated request/approval/payout/collection/receipt flows remain untested; online staging finance schema and ITC A/R policy remain unreleased.
+
+## Earlier repository and validation snapshot — 2026-10-23 (superseded)
 
 - The API is on the existing `staging` branch and the frontend remains on its existing `main` branch. The user's untracked backend `tsconfig.json` remains preserved. Both local branches contain docs-only commits ahead of their remotes; no push was made.
 - Fresh validation on the current checkouts: API `npm test` passed 397 with 4 PostgreSQL-gated skips; `npm run test:postgres` passed 4/4 using session-local temporary tables; and `npm run db:migrate:verify` confirmed local Expense Warrior migrations 0001–0017 with no blockers. Frontend `npm test` passed 70/70 and `npm run build` passed.
