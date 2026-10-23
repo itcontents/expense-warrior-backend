@@ -11,7 +11,7 @@
 
 ## Latest repository and validation verification — 2026-10-23 (refreshed)
 
-- API is on existing `staging` at `1a72c49` (one local commit ahead of cached `origin/staging`); frontend is on existing `main` at `1f5aeb5` (one ahead); ITC `production` is at `9bb0b9e` (seven ahead of cached `origin/production`). No branches were created or pushes made. Preserve the untracked API `tsconfig.json`.
+- API remains on existing `staging`; its latest QA evidence is `1a72c49`. Frontend remains on existing `main`; its sample-receipt correction is `1f5aeb5`. ITC's locally checked `production` tip is `9bb0b9e`, seven commits ahead of cached `origin/production`. No branches were created or pushes made. Preserve the untracked API `tsconfig.json`.
 - Frontend `npm test` passed 71/71 and `npm run build` passed after the sample-receipt preview fix. API source remains at its last recorded result of 399 passing with 4 PostgreSQL-gated skips. The running frontend is `http://192.168.1.139:5175`; Expense Warrior API readiness returns HTTP 200 on port 3100.
 - Authenticated Admin browser checks covered Overview, Approvals, My requests, Wallet, Payment links, Team, and Reports at 390×844 and 320×740. Sign-in/sign-out worked, page widths matched each viewport, and read-only workspace API calls returned HTTP 200. Storage inspection found no localStorage/sessionStorage keys.
 - The preview receipt fix (`1f5aeb5`) now reflects the selected network and entered phone suffix. At 390×844, the MTN sample flow displayed `MTN MoMo · •••• 4321`, made no API calls, and had no new console errors. This is fixture-only evidence.
