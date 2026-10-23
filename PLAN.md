@@ -2,6 +2,12 @@
 
 ## Responsibilities and boundaries
 
+## Current cross-repo alignment — 2026-10-23
+
+- Expense Warrior's approved V1 scope still includes delivered-invoice A/R settlement. The latest ITC shared handoff says Shop.IT's initial release defers customer A/R and its local `COMMERCE_CREDIT_INVOICES_ENABLED` gate is false. Preserve the approved Expense Warrior scope; do not represent the A/R flow as currently available until the ITC contract and release scope are aligned.
+- Expense Warrior local collections, payouts, and callback-inbox gates are enabled against PawaPay sandbox. ITC's finance gate is enabled locally, but the current ITC `.env` names database `itc`; the previously approved development target is `local_staging`. ITC `/api/v1/ready` is HTTP 200, but that response does not identify its connected database or prove Expense Warrior finance readiness. No signed finance request was made because accepted requests persist a replay nonce.
+- PawaPay's read-only Zambia/ZMW deposit configuration returned Airtel, MTN, and Zamtel. Merchant-account callback delivery remains unverified. ITC payment workers remain disabled and collection-refund processing remains off. No payment, payout, refund, migration, or database write was performed.
+
 ## Current release snapshot — 2026-10-22
 
 V1 source coverage includes requests and approvals, role-aware admin screens, wallet, payout retries, payment-link collections, customer-credit targets, and full-balance delivered-invoice A/R links. On `local_staging`, read-only ITC checks report migrations 145–149 applied and accounts 1100 and 2020 active/postable. The PawaPay sandbox account identity/version is bound in Expense Warrior and the account was read as `READY`; Expense Warrior may not treat its local balance as authoritative.
