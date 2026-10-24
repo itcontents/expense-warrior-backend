@@ -2,14 +2,28 @@
 
 ## Responsibilities and boundaries
 
-## Current cross-repo alignment — 2026-10-23
+## Current cross-repo alignment — 2026-10-25
+
+- **V1 scope:** Payment links support general revenue and customer-account credit only. Delivered-invoice A/R collection and credit-invoice conversion are out of V1; preserve historical A/R schemas and migration provenance, but do not expose or reactivate those paths. Customer account-credit collection to COA 2020 remains in scope.
+- ITC `local_staging` migration 150 is applied and the configured admin is enrolled. The validated `auth_refresh_tokens_audience_check` still excludes `expense_warrior`; a fresh read-only query confirms migration 153 has no ledger entry. ITC focused auth/bootstrap/migration checks pass 35/35. Sign-in remains blocked until migration 153 is applied and verified.
+- Migration 151 remains a separate collections-schema blocker because the existing table is owned by `postgres`; no ownership change or migration write was performed. Online ITC staging readiness, account-level signed-only enforcement, callback delivery, provider reconciliation, and production deployment remain unverified.
+- The frontend at port 5175, Expense Warrior API at 3100, and isolated ITC local-staging API at 3002 currently return HTTP 200 on their sign-in/health routes. These checks do not prove authenticated workflows or financial readiness. No provider or financial operation was made.
+- Current source validation: backend `npm test` passes 401 with 4 PostgreSQL-gated skips; frontend `npm test` passes 76/76 and `npm run build` succeeds. These checks do not establish an authenticated session or exercise financial writes.
+
+## Previous cross-repo alignment — 2026-10-23
 
 - **V1 scope correction:** Payment links support general revenue and customer-account credit only. Delivered-invoice A/R collection and credit-invoice conversion are out of V1; this supersedes earlier A/R approval notes below. Preserve historical A/R schemas and migration provenance, but do not expose or reactivate those paths. Customer account-credit collection to COA 2020 remains in scope.
 - Online ITC `staging` is not ready for this integration. A fresh read-only check on 2026-10-23 found the Expense Warrior finance, collection, receivable, reservation, and credit-note tables absent and COA 1100 inactive/non-postable. Do not enable or exercise finance there until ITC migrations, account readiness, provider binding, and service permissions are separately reviewed and authorized.
 - Local PawaPay collection, payout, and callback-inbox flags are enabled for sandbox development. ITC's standard local API on port 3000 remains pointed at `itc`; a separate isolated ITC process on port 3002 targets `local_staging` for the owner's requested integration environment. The Expense Warrior frontend proxy and API target that isolated process; the API is ready on 3100. No signed finance request was made because accepted HMAC requests persist a replay nonce. No payment, payout, refund, posting, migration, or persistent business-data write was performed.
 - Merchant-account callback delivery remains unverified. ITC payment workers and collection-refund processing remain disabled. Production provider readiness and deployment are separate, incomplete gates.
 
-## Latest repository and validation verification — 2026-10-23 (refreshed)
+## Latest repository and validation verification — 2026-10-25
+
+- ITC auth audience migration 153 is authored, checksum-pinned, and guarded by a target-specific runner. The fresh read-only database query confirms it remains unapplied on `local_staging`; the associated ITC focused auth/bootstrap/migration checks pass 35/35 and `git diff --check` passes. The auth blocker is isolated from migration 151 and provider flows.
+- The services currently return HTTP 200 at frontend port 5175, Expense Warrior API port 3100, and ITC local-staging API port 3002. The login page renders, but authenticated UI verification cannot proceed until migration 153 is applied and the login is retested.
+- Preserve all dirty/untracked files on ITC `production`; no branch was created and no files were staged or committed by this verification. Existing local Expense Warrior database, provider, finance, populated-workflow, staging, and production gates remain as historical/currently unverified in the sections below.
+
+## Latest repository and validation verification — 2026-10-23 (historical)
 
 - ITC membership is implemented in source with an explicit `has_pettycash_access` switch and separate `admin`/`staff` role. A read-only check of ITC `local_staging` found migration 150 unrecorded and `expense_warrior_memberships` absent, so authenticated Expense Warrior sign-in and enrollment remain blocked there until the guarded migration is owner-applied.
 - Fresh checks for this source update: frontend tests 76/76 and build passed; Expense Warrior API tests 400 passed with 4 PostgreSQL-gated skips; ITC membership/auth tests 23/23 and migration/release/bootstrap guard tests 81/81 passed; backoffice membership/quote tests 6/6 and build passed. These do not prove authenticated membership use or financial execution.
