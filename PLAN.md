@@ -8,7 +8,7 @@
 - ITC `local_staging` migration 150 is applied and the configured admin is enrolled. The validated `auth_refresh_tokens_audience_check` still excludes `expense_warrior`; a fresh read-only query confirms migration 153 has no ledger entry. ITC focused auth/bootstrap/migration checks pass 35/35. Sign-in remains blocked until migration 153 is applied and verified.
 - Migration 151 remains a separate collections-schema blocker because the existing table is owned by `postgres`; no ownership change or migration write was performed. Online ITC staging readiness, account-level signed-only enforcement, callback delivery, provider reconciliation, and production deployment remain unverified.
 - The frontend at port 5175, Expense Warrior API at 3100, and isolated ITC local-staging API at 3002 currently return HTTP 200 on their sign-in/health routes. These checks do not prove authenticated workflows or financial readiness. No provider or financial operation was made.
-- Current source validation: backend `npm test` passes 401 with 4 PostgreSQL-gated skips; frontend `npm test` passes 76/76 and `npm run build` succeeds. These checks do not establish an authenticated session or exercise financial writes.
+- Current source validation: backend `npm test` passes 401 with 4 PostgreSQL-gated skips; the separately approved `npm run test:postgres` passes 4/4 using session-local temporary tables; frontend `npm test` passes 76/76 and `npm run build` succeeds. These checks do not establish an authenticated session or exercise financial writes.
 
 ## Previous cross-repo alignment — 2026-10-23
 
