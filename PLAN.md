@@ -20,6 +20,7 @@
 ## Latest repository and validation verification — 2026-10-25
 
 - ITC auth audience migration 153 is authored, checksum-pinned, and guarded by a target-specific runner. The fresh read-only database query confirms it remains unapplied on `local_staging`; the associated ITC focused auth/bootstrap/migration checks pass 35/35 and `git diff --check` passes. The auth blocker is isolated from migration 151 and provider flows.
+- A broader ITC Expense Warrior/auth/migration/bootstrap/V1-scope suite passed 173 tests with 6 skipped in serial mode; ITC `npm test` also passed. `validate_commerce_release_artifacts.js --report-only` remains `BLOCKED` on three tracked-state checks: migration 153's three files are untracked, migration 153 is untracked in the migration chain, and release-critical files remain modified.
 - The services currently return HTTP 200 at frontend port 5175, Expense Warrior API port 3100, and ITC local-staging API port 3002. The login page renders, but authenticated UI verification cannot proceed until migration 153 is applied and the login is retested.
 - Preserve all dirty/untracked files on ITC `production`; no branch was created and no files were staged or committed by this verification. Existing local Expense Warrior database, provider, finance, populated-workflow, staging, and production gates remain as historical/currently unverified in the sections below.
 
