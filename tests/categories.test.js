@@ -112,6 +112,56 @@ test('accounting category map administration is admin-only and validates against
     assert.equal(invalid.status, 422)
   })
   assert.ok(calls.some(({ sql }) => sql.startsWith('INSERT INTO audit_events')))
+  const lockQuery = calls.find(({ sql }) => sql.includes('FROM expense_categories category') && sql.includes('LEFT JOIN expense_categories parent'))
+  assert.match(lockQuery.sql, /FOR UPDATE OF category$/i)
+})
+
+test('accounting category map failures log only the failing stage and safe error code', async () => {
+  const logs = []
+  const client = {
+    async query(sql, values = []) {
+      const normalized = sql.replace(/\s+/g, ' ').trim()
+      if (normalized === 'BEGIN' || normalized === 'ROLLBACK') return { rowCount: 0, rows: [] }
+      if (normalized.includes('FROM expense_categories category') && normalized.includes('LEFT JOIN expense_categories parent')) {
+        return { rows: [{ category_id: '550e8400-e29b-41d4-a716-446655440000', code: 'OFFICE_SUPPLIES', parent_category_id: null, itc_expense_category_code: null, parent_code: null }] }
+      }
+      if (normalized.startsWith('UPDATE expense_categories')) {
+        return { rows: [{ category_id: values[0], code: 'OFFICE_SUPPLIES', parent_category_id: null, itc_expense_category_code: values[1], updated_at: '2026-10-27T12:00:00.000Z' }] }
+      }
+      if (normalized.startsWith('INSERT INTO audit_events')) {
+        throw Object.assign(new Error('permission denied for table audit_events'), { code: '42501' })
+      }
+      throw new Error(`Unexpected category map query: ${normalized}`)
+    },
+    release() {},
+  }
+  const app = createApp({
+    pool: {
+      async query() { return { rows: [] } },
+      async connect() { return client },
+    },
+    identityClient: { getSession: async () => ({ customerId: 'admin-1', role: 'admin', active: true }) },
+    itcFinanceClient: { getExpenseCategories: async () => [{ category_code: 'consumables', category_name: 'Operating Consumables', account_code: '6280' }] },
+    logger: { error: (entry) => logs.push(entry) },
+  })
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/admin/categories/550e8400-e29b-41d4-a716-446655440000/accounting-map`, {
+      method: 'PUT',
+      headers: { Cookie: 'itc_expense_warrior_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json', 'X-Request-Id': 'category-map-test' },
+      body: JSON.stringify({ itc_expense_category_code: 'consumables' }),
+    })
+    assert.equal(response.status, 503)
+    assert.deepEqual(await response.json(), { error: { code: 'ACCOUNTING_CATEGORY_MAP_UNAVAILABLE', message: 'The accounting category mapping could not be saved' } })
+  })
+
+  assert.equal(logs.length, 1)
+  const entry = JSON.parse(logs[0])
+  assert.equal(entry.event, 'expense_category_accounting_map_failed')
+  assert.equal(entry.request_id, 'category-map-test')
+  assert.equal(entry.stage, 'audit_insert')
+  assert.equal(entry.error_code, '42501')
+  assert.equal(Object.hasOwn(entry, 'message'), false)
 })
 
 test('accounting category map configuration refuses staff actors', async () => {

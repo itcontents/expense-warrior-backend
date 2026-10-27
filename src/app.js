@@ -8,7 +8,7 @@ function validRequestId(value) {
 
 function createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault,
   callbackInboxEnabled = false, callbackInboxRepository = null, collectionPaymentsEnabled = false, staffPayoutsEnabled = false,
-  browserOrigins = null, nodeEnv = process.env.NODE_ENV || 'development' }) {
+  browserOrigins = null, nodeEnv = process.env.NODE_ENV || 'development', logger = console }) {
   if (!pool || typeof pool.query !== 'function') {
     throw new TypeError('A PostgreSQL-compatible pool is required')
   }
@@ -154,7 +154,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
       const payoutDestinationService = createPayoutDestinationService({ repository: payoutDestinationRepository, phoneVault, providerRegistry: paymentProviders })
       app.use('/api/v1/expense-warrior', createPayoutDestinationRouter({ identityClient, destinationService: payoutDestinationService }))
     }
-    app.use('/api/v1/expense-warrior', createCategoryRouter({ pool, identityClient, itcFinanceClient }))
+    app.use('/api/v1/expense-warrior', createCategoryRouter({ pool, identityClient, itcFinanceClient, logger }))
     app.use('/api/v1/expense-warrior', createRequestRouter({ identityClient, requestService, pool, attachmentStorage, staffPayoutsEnabled }))
     app.use('/api/v1/expense-warrior', createManagerAssignmentRouter({ identityClient, assignmentService: managerAssignmentService }))
     app.use('/api/v1/expense-warrior', createReportRouter({ identityClient, reportService }))
