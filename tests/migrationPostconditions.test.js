@@ -15,6 +15,25 @@ function indexSpecification(name) {
   return Object.values(MIGRATION_POSTCONDITIONS).flatMap((migration) => migration.indexes || []).find((index) => index.name === name)
 }
 
+function expectedPrivilege(type, predicate) {
+  return Object.values(MIGRATION_POSTCONDITIONS).flatMap((migration) => migration[type] || []).find(predicate)
+}
+
+function runtimeRoleRow(name, fault = {}) {
+  const spec = expectedPrivilege('roles', (role) => role.name === name)
+  return {
+    role_name: name,
+    can_login: spec?.canLogin === true,
+    is_superuser: spec?.superuser === true,
+    can_create_database: spec?.createDb === true,
+    can_create_role: spec?.createRole === true,
+    can_replicate: spec?.replication === true,
+    bypasses_row_security: spec?.bypassRls === true,
+    inherits_privileges: fault.wrongRole === name ? !spec?.inherit : spec?.inherit === true,
+    has_no_memberships: spec?.noMemberships === true,
+  }
+}
+
 function createPostconditionClient(fault = {}) {
   return {
     async query(sql, params = []) {
@@ -44,13 +63,28 @@ function createPostconditionClient(fault = {}) {
         is_validated: constraint_name !== fault.unvalidatedConstraint,
         definition: constraintDefinition(constraint_name),
       })) }
+      if (/FROM unnest\(\$1::text\[\]\) AS required\(role_name\)\s+LEFT JOIN pg_catalog\.pg_roles/i.test(sql)) return { rows: params[0].map((role_name) => runtimeRoleRow(role_name, fault)) }
+      if (/has_database_privilege/i.test(sql)) return { rows: params[0].map((role_name, index) => {
+        const spec = expectedPrivilege('databasePrivileges', (entry) => entry.role === role_name && entry.privilege === params[1][index])
+        return { role_name, privilege_type: params[1][index], is_granted: `${role_name}.${params[1][index]}` === fault.wrongDatabasePrivilege ? !spec?.granted : spec?.granted === true }
+      }) }
+      if (/has_schema_privilege/i.test(sql)) return { rows: params[0].map((schema_name, index) => {
+        const role_name = params[1][index], privilege_type = params[2][index]
+        const spec = expectedPrivilege('schemaPrivileges', (entry) => entry.schema === schema_name && entry.role === role_name && entry.privilege === privilege_type)
+        return { schema_name, role_name, privilege_type, is_granted: `${schema_name}.${role_name}.${privilege_type}` === fault.wrongSchemaPrivilege ? !spec?.granted : spec?.granted === true }
+      }) }
+      if (/has_column_privilege/i.test(sql)) return { rows: params[0].map((table_name, index) => {
+        const column_name = params[1][index], role_name = params[2][index], privilege_type = params[3][index]
+        const spec = expectedPrivilege('columnPrivileges', (entry) => entry.table === table_name && entry.column === column_name && entry.role === role_name && entry.privilege === privilege_type)
+        return { table_name, column_name, role_name, privilege_type, is_granted: `${table_name}.${column_name}.${role_name}.${privilege_type}` === fault.wrongColumnPrivilege ? !spec?.granted : spec?.granted === true }
+      }) }
       if (/has_table_privilege/i.test(sql)) return { rows: params[0].map((table_name, index) => ({
         table_name, role_name: params[1][index], privilege_type: params[2][index],
         is_granted: table_name === fault.missingRelation
           ? (/THEN NULL/i.test(sql) ? null : false)
           : `${table_name}.${params[1][index]}.${params[2][index]}` === fault.wrongPrivilege
-          ? !['SELECT', 'INSERT'].includes(params[2][index])
-          : ['SELECT', 'INSERT'].includes(params[2][index]),
+          ? !expectedPrivilege('privileges', (entry) => entry.table === table_name && entry.role === params[1][index] && entry.privilege === params[2][index])?.granted
+          : expectedPrivilege('privileges', (entry) => entry.table === table_name && entry.role === params[1][index] && entry.privilege === params[2][index])?.granted === true,
       })) }
       return { rows: [] }
     },
@@ -85,16 +119,29 @@ test('postcondition verification uses catalog SELECTs and returns one result per
       if (/pg_catalog\.pg_constraint/i.test(sql)) return { rows: params[0].map((constraint_name) => ({
         constraint_name, constraint_type: 'c', is_validated: true, definition: constraintDefinition(constraint_name),
       })) }
+      if (/FROM unnest\(\$1::text\[\]\) AS required\(role_name\)\s+LEFT JOIN pg_catalog\.pg_roles/i.test(sql)) return { rows: params[0].map((role_name) => runtimeRoleRow(role_name)) }
+      if (/has_database_privilege/i.test(sql)) return { rows: params[0].map((role_name, index) => ({
+        role_name, privilege_type: params[1][index],
+        is_granted: expectedPrivilege('databasePrivileges', (entry) => entry.role === role_name && entry.privilege === params[1][index])?.granted === true,
+      })) }
+      if (/has_schema_privilege/i.test(sql)) return { rows: params[0].map((schema_name, index) => ({
+        schema_name, role_name: params[1][index], privilege_type: params[2][index],
+        is_granted: expectedPrivilege('schemaPrivileges', (entry) => entry.schema === schema_name && entry.role === params[1][index] && entry.privilege === params[2][index])?.granted === true,
+      })) }
+      if (/has_column_privilege/i.test(sql)) return { rows: params[0].map((table_name, index) => ({
+        table_name, column_name: params[1][index], role_name: params[2][index], privilege_type: params[3][index],
+        is_granted: expectedPrivilege('columnPrivileges', (entry) => entry.table === table_name && entry.column === params[1][index] && entry.role === params[2][index] && entry.privilege === params[3][index])?.granted === true,
+      })) }
       if (/has_table_privilege/i.test(sql)) return { rows: params[0].map((table_name, index) => ({
         table_name, role_name: params[1][index], privilege_type: params[2][index],
-        is_granted: ['SELECT', 'INSERT'].includes(params[2][index]),
+        is_granted: expectedPrivilege('privileges', (entry) => entry.table === table_name && entry.role === params[1][index] && entry.privilege === params[2][index])?.granted === true,
       })) }
       return { rows: [] }
     },
   }
   const result = await verifyMigrationPostconditions(client, migrations)
   assert.equal(result.verified.length, migrations.length)
-  assert.ok(result.verified.every(({ passed }) => passed))
+  assert.ok(result.verified.every(({ passed }) => passed), JSON.stringify(result.verified.filter(({ passed }) => !passed), null, 2))
   assert.deepEqual(result.blockers, [])
   assert.ok(statements.every((statement) => /^SELECT\b/i.test(statement)))
   assert.ok(statements.some((statement) => /pg_catalog\.pg_index/.test(statement)))
@@ -153,6 +200,19 @@ test('postcondition verification rejects missing runtime grants or excessive clo
   }
 })
 
+test('runtime permissions reject broad request updates and immutable finance-column updates', async () => {
+  const migrations = await collectMigrations()
+  for (const fault of [
+    { wrongPrivilege: 'expense_requests.expense_warrior_app.UPDATE' },
+    { wrongColumnPrivilege: 'expense_requests.amount.expense_warrior_app.UPDATE' },
+    { wrongColumnPrivilege: 'request_payout_attempts.provider_account_id.expense_warrior_app.UPDATE' },
+  ]) {
+    const result = await verifyMigrationPostconditions(createPostconditionClient(fault), migrations)
+    const runtimeMigration = result.verified.find(({ migration }) => migration === '0018_runtime_role_permissions.sql')
+    assert.equal(runtimeMigration.passed, false, JSON.stringify(fault))
+  }
+})
+
 test('postcondition verification does not treat an absent closure table as satisfying denied privileges', async () => {
   const migrations = await collectMigrations()
   const result = await verifyMigrationPostconditions(createPostconditionClient({ missingRelation: 'payment_link_receivable_closures' }), migrations)
@@ -186,7 +246,7 @@ function createVerificationPool(migrations, { missingRelation = null, ledgerRows
     async query(sql, params = []) {
       const statement = sql.trim()
       statements.push(statement)
-      if (/current_database\(\)/i.test(statement)) return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: target.schema, search_path: target.searchPath, is_in_recovery: false, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] }
+      if (/SELECT current_database\(\) AS database/i.test(statement)) return { rows: [{ database: target.database, current_role_name: target.user, session_role_name: target.user, schema_name: target.schema, search_path: target.searchPath, is_in_recovery: false, is_superuser: false, can_create_database: false, can_create_role: false, can_replicate: false, bypasses_row_security: false }] }
       if (/AS ledger_exists/i.test(statement)) return { rows: [{ ledger_exists: true, application_object_count: 25 }] }
       if (/SELECT migration_name, checksum/i.test(statement)) return { rows: ledgerRows || migrations.map(({ name, checksum }) => ({ migration_name: name, checksum })) }
       if (/FROM unnest\(\$1::text\[\]\) AS required\(relation_name\)/i.test(statement)) return { rows: params[0].filter((name) => name !== missingRelation).map((relation_name) => ({ relation_name })) }
@@ -206,9 +266,22 @@ function createVerificationPool(migrations, { missingRelation = null, ledgerRows
       if (/pg_catalog\.pg_constraint/i.test(statement)) return { rows: params[0].map((constraint_name) => ({
         constraint_name, constraint_type: 'c', is_validated: true, definition: constraintDefinition(constraint_name),
       })) }
+      if (/FROM unnest\(\$1::text\[\]\) AS required\(role_name\)\s+LEFT JOIN pg_catalog\.pg_roles/i.test(statement)) return { rows: params[0].map((role_name) => runtimeRoleRow(role_name)) }
+      if (/has_database_privilege/i.test(statement)) return { rows: params[0].map((role_name, index) => ({
+        role_name, privilege_type: params[1][index],
+        is_granted: expectedPrivilege('databasePrivileges', (entry) => entry.role === role_name && entry.privilege === params[1][index])?.granted === true,
+      })) }
+      if (/has_schema_privilege/i.test(statement)) return { rows: params[0].map((schema_name, index) => ({
+        schema_name, role_name: params[1][index], privilege_type: params[2][index],
+        is_granted: expectedPrivilege('schemaPrivileges', (entry) => entry.schema === schema_name && entry.role === params[1][index] && entry.privilege === params[2][index])?.granted === true,
+      })) }
+      if (/has_column_privilege/i.test(statement)) return { rows: params[0].map((table_name, index) => ({
+        table_name, column_name: params[1][index], role_name: params[2][index], privilege_type: params[3][index],
+        is_granted: expectedPrivilege('columnPrivileges', (entry) => entry.table === table_name && entry.column === params[1][index] && entry.role === params[2][index] && entry.privilege === params[3][index])?.granted === true,
+      })) }
       if (/has_table_privilege/i.test(statement)) return { rows: params[0].map((table_name, index) => ({
         table_name, role_name: params[1][index], privilege_type: params[2][index],
-        is_granted: ['SELECT', 'INSERT'].includes(params[2][index]),
+        is_granted: expectedPrivilege('privileges', (entry) => entry.table === table_name && entry.role === params[1][index] && entry.privilege === params[2][index])?.granted === true,
       })) }
       return { rows: [] }
     },

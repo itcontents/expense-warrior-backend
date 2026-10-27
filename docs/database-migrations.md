@@ -18,6 +18,18 @@ When more than one name is allowlisted, also set `DB_MIGRATION_TARGETS_JSON` to 
 
 The migration connection pins its session search path to `public, pg_temp`: unqualified migration objects go into `public`, and temporary objects cannot shadow them. Preflight inventories application objects across user schemas, including empty custom schemas, tables, partitions, views, materialized views, foreign tables, sequences, indexes, functions, and user-defined types. It blocks a database with existing objects but no migration ledger. The migration role must not be a superuser or have `CREATEDB`, `CREATEROLE`, replication, or `BYPASSRLS` privileges. It needs catalog and ledger reads for preflight and only the DDL privileges required by Expense Warrior migrations on this database. Keep it out of the API process and do not commit `.env.migrations`.
 
+## Bootstrap a new Expense Warrior database
+
+The staging/server operator creates the database and two independent login roles before running the migration runner. Use the approved secret store to set distinct passwords; never put password literals in SQL copied into tickets or this document.
+
+- Database: a dedicated `expense_warrior_*` database (for staging, use `expense_warrior_staging`). Do not share it with ITC or another application.
+- `expense_warrior_migrator`: `LOGIN`, `NOINHERIT`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`; database owner (or explicitly granted the reviewed DDL rights on this dedicated database and `public` schema). It must not be a member of another privileged role.
+- `expense_warrior_app`: `LOGIN`, `NOINHERIT`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`; no role memberships. It must not own the database, schema, tables, or functions.
+
+Migration `0018_runtime_role_permissions.sql` grants the runtime role `CONNECT`, `public.USAGE`, and only the table/column actions used by the API. It removes `public.CREATE` and broad table privileges from `PUBLIC` and the runtime role, grants no `DELETE` or `TRUNCATE`, and leaves the migration ledger inaccessible to the runtime role. Its postconditions check the runtime role attributes, database/schema access, and all granted/denied table and column permissions. The application refuses to start unless `DB_USER=expense_warrior_app`.
+
+Configure the API `.env` to connect to the new database as `expense_warrior_app`. Configure the separate ignored `.env.migrations` with the same target tuple and `expense_warrior_migrator`. Then use the normal read-only `status` and `plan` checks, review the fresh database as `NEW_EMPTY_DATABASE`, and run the guarded apply for migrations `0001` through `0018`. Finish with `verify`; deployment is blocked if any permission postcondition fails. Do not apply these migrations on a shared ITC database. The migration runner does not create databases or roles.
+
 If an existing migration ledger is owned by another role, the database owner must grant `SELECT` on only `public.expense_warrior_schema_migrations` to `expense_warrior_migrator` before `status`, `plan`, and `verify` can inspect it. Do not grant read access to every application table. Review the ledger and object ownership before applying migrations; the migration role must have only the ledger-write and DDL rights needed for the reviewed pending migrations.
 
 ## Review and apply

@@ -61,6 +61,13 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
     throw failure
   }
 
+  if (value.DB_USER !== 'expense_warrior_app') {
+    const failure = new Error('Runtime database connections must use the restricted Expense Warrior application role')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['DB_USER']
+    throw failure
+  }
+
   if (!includeMigrationCredentials && (value.DB_MIGRATION_USER || value.DB_MIGRATION_PASSWORD)) {
     const failure = new Error('Migration database credentials are not available to the runtime application')
     failure.code = 'CONFIG_INVALID'

@@ -21,7 +21,7 @@ test('loadConfig rejects missing dedicated database credentials', () => {
 
 test('ITC commerce receivables cannot be enabled by an environment variable', () => {
   const values = {
-    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'expense_warrior_app', DB_PASSWORD: 'configured-for-test',
     ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
   }
   assert.equal('commerceReceivablesEnabled' in loadConfig(values).itc, false)
@@ -53,6 +53,17 @@ test('loadConfig keeps migration credentials out of the runtime and rejects part
     (error) => error.code === 'CONFIG_INVALID' && error.details.includes('DB_MIGRATION_USER'))
 })
 
+test('loadConfig requires the dedicated runtime role named by the permission migrations', () => {
+  const values = {
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_PORT: '5432', DB_NAME: 'expense_warrior',
+    DB_USER: 'expense_warrior_api', DB_PASSWORD: 'runtime-password',
+    ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
+  }
+  assert.throws(() => loadConfig(values),
+    (error) => error.code === 'CONFIG_INVALID' && error.details.includes('DB_USER'))
+  assert.doesNotThrow(() => loadConfig({ ...values, DB_USER: 'expense_warrior_app' }))
+})
+
 test('loadConfig rejects production HTTP ITC integration URLs', () => {
   assert.throws(
     () => loadConfig({
@@ -60,7 +71,7 @@ test('loadConfig rejects production HTTP ITC integration URLs', () => {
       DB_HOST: 'db.internal',
       DB_PORT: '5432',
       DB_NAME: 'expense_warrior',
-      DB_USER: 'expense_warrior_api',
+      DB_USER: 'expense_warrior_app',
       DB_PASSWORD: 'configured-for-test',
       ITC_API_BASE_URL: 'http://itc.internal/api/v1',
     }),
@@ -74,7 +85,7 @@ test('loadConfig exposes PawaPay config and rejects the sandbox API in productio
     DB_HOST: 'db.internal',
     DB_PORT: '5432',
     DB_NAME: 'expense_warrior',
-    DB_USER: 'expense_warrior_api',
+    DB_USER: 'expense_warrior_app',
     DB_PASSWORD: 'configured-for-test',
     DB_SSL_MODE: 'require',
     ITC_API_BASE_URL: 'https://itc.internal/api/v1',
@@ -96,7 +107,7 @@ test('loadConfig exposes PawaPay config and rejects the sandbox API in productio
 
 test('loadConfig requires explicit HTTPS browser origins in production and rejects non-origin URLs', () => {
   const values = {
-    NODE_ENV: 'production', DB_HOST: 'db.internal', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    NODE_ENV: 'production', DB_HOST: 'db.internal', DB_NAME: 'expense_warrior', DB_USER: 'expense_warrior_app', DB_PASSWORD: 'configured-for-test',
     DB_SSL_MODE: 'require', ITC_API_BASE_URL: 'https://itc.internal/api/v1', PAWAPAY_BASE_URL: 'https://api.pawapay.io',
     EXPENSE_WARRIOR_PAYOUT_DESTINATION_KEYS_JSON: '{"k1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}',
     EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID: 'k1',
@@ -113,7 +124,7 @@ test('loadConfig requires explicit HTTPS browser origins in production and rejec
 
 test('PawaPay callback inbox is disabled by default and can be explicitly enabled', () => {
   const values = {
-    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'expense_warrior_app', DB_PASSWORD: 'configured-for-test',
     ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
   }
   assert.equal(loadConfig(values).pawaPay.callbackInboxEnabled, false)
@@ -136,7 +147,7 @@ test('PawaPay callback inbox is disabled by default and can be explicitly enable
 
 test('PawaPay collections require an explicit matching ITC provider account identity', () => {
   const values = {
-    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'expense_warrior_app', DB_PASSWORD: 'configured-for-test',
     ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1', PAWAPAY_COLLECTIONS_ENABLED: 'true',
     PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED: 'true',
   }
@@ -146,7 +157,7 @@ test('PawaPay collections require an explicit matching ITC provider account iden
 
 test('loadConfig requires Cloudinary credentials as a complete set', () => {
   const values = {
-    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'expense_warrior_app', DB_PASSWORD: 'configured-for-test',
     ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
   }
   assert.throws(() => loadConfig({ ...values, CLOUDINARY_CLOUD_NAME: 'cloud' }), (error) => error.code === 'CONFIG_INVALID')
@@ -159,7 +170,7 @@ test('loadConfig requires Cloudinary credentials as a complete set', () => {
 
 test('financial PawaPay operations require explicit account-level signed-only confirmation', () => {
   const values = {
-    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'api', DB_PASSWORD: 'configured-for-test',
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'expense_warrior_app', DB_PASSWORD: 'configured-for-test',
     ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
   }
 
