@@ -1,6 +1,7 @@
 const express = require('express')
 const { randomUUID } = require('node:crypto')
 const { createCookieCsrfGuard, parseAllowedBrowserOrigins } = require('./auth/cookieCsrfGuard')
+const { createBrowserCors } = require('./auth/browserCors')
 
 function validRequestId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value)
@@ -28,6 +29,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
     res.set('Referrer-Policy', 'no-referrer')
     next()
   })
+  app.use(createBrowserCors({ allowedOrigins: allowedBrowserOrigins, nodeEnv }))
   app.use(createCookieCsrfGuard({ allowedOrigins: allowedBrowserOrigins, nodeEnv }))
 
   // Provider callbacks sign raw HTTP bodies. These bounded raw parsers must run

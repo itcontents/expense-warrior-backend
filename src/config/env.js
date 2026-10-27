@@ -4,6 +4,7 @@ const { parseAllowedBrowserOrigins } = require('../auth/cookieCsrfGuard')
 const configSchema = Joi.object({
   NODE_ENV: Joi.string().valid('development', 'test', 'production').default('development'),
   PORT: Joi.number().integer().min(1).max(65535).default(3100),
+  API_BIND_HOST: Joi.string().ip({ version: ['ipv4', 'ipv6'] }).default('127.0.0.1'),
   DB_HOST: Joi.string().trim().min(1).required(),
   DB_PORT: Joi.number().integer().min(1).max(65535).default(5432),
   DB_NAME: Joi.string().trim().min(1).required(),
@@ -162,6 +163,7 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
   return Object.freeze({
     nodeEnv: value.NODE_ENV,
     port: value.PORT,
+    bindHost: value.API_BIND_HOST,
     browserOrigins: Object.freeze(browserOrigins),
     database: Object.freeze({
       host: value.DB_HOST,

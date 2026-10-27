@@ -61,4 +61,4 @@ function createCookieCsrfGuard({ allowedOrigins = [], nodeEnv = process.env.NODE
   }
 }
 
-module.exports = { createCookieCsrfGuard, hasExpenseWarriorAccessCookie, parseAllowedBrowserOrigins }
+module.exports = { createCookieCsrfGuard, hasExpenseWarriorAccessCookie, isAllowedBrowserOrigin, parseAllowedBrowserOrigins }

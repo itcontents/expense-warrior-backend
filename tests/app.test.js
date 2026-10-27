@@ -55,7 +55,7 @@ test('publicPaymentRoutesReportCollectionsDisabledWithoutStartingAttempts', asyn
 
     const attempt = await fetch(`${baseUrl}/api/v1/expense-warrior/public/payment-links/public-token/attempts`, {
       method: 'POST',
-      headers: { origin: 'https://untrusted.example', 'Content-Type': 'application/json', 'Idempotency-Key': '00000000-0000-4000-8000-000000000001' },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': '00000000-0000-4000-8000-000000000001' },
       body: JSON.stringify({ network_code: 'MTN_MOMO_ZMB', phone_number: '260957909783' }),
     })
     assert.equal(attempt.status, 503)
@@ -91,7 +91,7 @@ test('cookieAuthenticatedMutationsRejectUntrustedOriginsBeforeITCIdentityLookup'
     assert.equal(response.status, 403)
     assert.equal(identityLookups, 0)
     assert.deepEqual(await response.json(), {
-      error: { code: 'CSRF_ORIGIN_DENIED', message: 'Request origin validation failed' },
+      error: { code: 'BROWSER_ORIGIN_DENIED', message: 'Request origin validation failed' },
     })
   })
 })

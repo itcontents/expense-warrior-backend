@@ -19,6 +19,16 @@ test('loadConfig rejects missing dedicated database credentials', () => {
   )
 })
 
+test('loadConfig binds the API to loopback by default and supports an explicit development bind address', () => {
+  const values = {
+    NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior',
+    DB_USER: 'expense_warrior_app', DB_PASSWORD: 'runtime-password',
+    ITC_API_BASE_URL: 'http://127.0.0.1:3000/api/v1',
+  }
+  assert.equal(loadConfig(values).bindHost, '127.0.0.1')
+  assert.equal(loadConfig({ ...values, API_BIND_HOST: '0.0.0.0' }).bindHost, '0.0.0.0')
+})
+
 test('ITC commerce receivables cannot be enabled by an environment variable', () => {
   const values = {
     NODE_ENV: 'test', DB_HOST: '127.0.0.1', DB_NAME: 'expense_warrior', DB_USER: 'expense_warrior_app', DB_PASSWORD: 'configured-for-test',
