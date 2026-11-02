@@ -11,11 +11,20 @@ class RequestServiceError extends Error {
   }
 }
 
+function actorRole(actor) {
+  const role = String(actor?.role || '').toLowerCase()
+  return role === 'manager' ? 'staff' : role
+}
+
+function repositoryActor(actor) {
+  return { customerId: actor.customerId, role: actorRole(actor) }
+}
+
 function assertStaffActor(actor) {
   if (!actor?.active || !UUID_PATTERN.test(String(actor.customerId || ''))) {
     throw new RequestServiceError('AUTHENTICATION_REQUIRED', 401)
   }
-  if (!['staff', 'admin'].includes(String(actor.role || '').toLowerCase())) {
+  if (!['staff', 'admin'].includes(actorRole(actor))) {
     throw new RequestServiceError('FORBIDDEN', 403)
   }
 }
@@ -71,7 +80,6 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
   return Object.freeze({
     async submitRequest(actor, input, idempotencyKey, { file, requestId } = {}) {
       assertStaffActor(actor)
-      if (String(actor.role || '').toLowerCase() !== 'staff') throw new RequestServiceError('FORBIDDEN', 403)
       const request = validateSubmission(input, idempotencyKey)
       let attachment = null
       if (file) {
@@ -86,7 +94,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
       }
       try {
         const result = await repository.submit({
-          actor: { customerId: actor.customerId, role: String(actor.role).toLowerCase() },
+          actor: repositoryActor(actor),
           request,
           attachment,
           idempotencyKey,
@@ -104,7 +112,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
       assertStaffActor(actor)
       const normalizedFilters = normalizeFilters(filters)
       return repository.listForActor({
-        actor: { customerId: actor.customerId, role: String(actor.role).toLowerCase() },
+        actor: repositoryActor(actor),
         filters: normalizedFilters,
       })
     },
@@ -113,7 +121,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
       assertStaffActor(actor)
       const normalizedFilters = normalizeFilters(filters)
       return repository.listApprovals({
-        actor: { customerId: actor.customerId, role: String(actor.role).toLowerCase() },
+        actor: repositoryActor(actor),
         filters: normalizedFilters,
       })
     },
@@ -121,14 +129,14 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
     async approveManager(actor, requestId, requestIdForAudit = null) {
       assertStaffActor(actor)
       if (!UUID_PATTERN.test(String(requestId || ''))) throw new RequestServiceError('INVALID_REQUEST', 400)
-      if (String(actor.role).toLowerCase() !== 'staff') throw new RequestServiceError('FORBIDDEN', 403)
+      if (actorRole(actor) !== 'staff') throw new RequestServiceError('FORBIDDEN', 403)
       if (typeof repository.prepareManagerApproval !== 'function' ||
           typeof repository.completeManagerApproval !== 'function' ||
           typeof repository.markManagerApprovalFailure !== 'function') {
         throw new RequestServiceError('APPROVAL_SERVICE_UNAVAILABLE', 503)
       }
 
-      const actorContext = { customerId: actor.customerId, role: 'staff' }
+      const actorContext = repositoryActor(actor)
       const prepared = await repository.prepareManagerApproval({ actor: actorContext, requestId, requestIdForAudit })
       if (prepared.replayed) return { request: prepared.request, pending: false, replayed: true }
 
@@ -205,7 +213,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
         throw new RequestServiceError('ATTACHMENT_NOT_FOUND', 404)
       }
       const attachment = await repository.findAttachment({
-        actor: { customerId: actor.customerId, role: String(actor.role).toLowerCase() },
+        actor: repositoryActor(actor),
         requestId,
         attachmentId,
       })
@@ -241,11 +249,11 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
       const normalizedReason = typeof reason === 'string' ? reason.trim() : ''
       if (!normalizedReason) throw new RequestServiceError('REJECTION_REASON_REQUIRED', 422)
       if (normalizedReason.length > 2000) throw new RequestServiceError('INVALID_REQUEST', 400)
-      if ((stage === 'admin' && String(actor.role).toLowerCase() !== 'admin') ||
-          (stage === 'manager' && String(actor.role).toLowerCase() !== 'staff')) {
+      if ((stage === 'admin' && actorRole(actor) !== 'admin') ||
+          (stage === 'manager' && actorRole(actor) !== 'staff')) {
         throw new RequestServiceError('FORBIDDEN', 403)
       }
-      const actorContext = { customerId: actor.customerId, role: String(actor.role).toLowerCase() }
+      const actorContext = repositoryActor(actor)
       if (stage === 'admin' && typeof repository.prepareAdminRejection === 'function') {
         const prepared = await repository.prepareAdminRejection({ actor: actorContext, requestId, reason: normalizedReason, requestIdForAudit })
         if (prepared.requiresRelease) {

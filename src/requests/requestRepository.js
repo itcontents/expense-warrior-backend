@@ -105,7 +105,7 @@ async function submit({ pool, actor, request, attachment = null, idempotencyKey,
     }
 
     let payoutDestination = null
-    if (actor.role === 'staff') {
+    if (['staff', 'admin'].includes(actor.role)) {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`ew-payout-destination:${actor.customerId.toLowerCase()}`])
       const destinationResult = await client.query(`
         SELECT destination_id, provider_code, network_code, phone_ciphertext, encryption_key_id, phone_last4
@@ -241,8 +241,7 @@ async function listForActor({ pool, actor, filters }) {
          ORDER BY created_at DESC, payout_id DESC
          LIMIT 1
       ) payout ON true
-     WHERE $1::text = 'admin'
-        OR r.requester_customer_id = $2
+     WHERE r.requester_customer_id = $2
         OR ($1::text = 'staff' AND r.reviewer_manager_customer_id = $2)
      ORDER BY ${column} ${filters.direction.toUpperCase()}, r.request_id DESC
      LIMIT $3 OFFSET $4

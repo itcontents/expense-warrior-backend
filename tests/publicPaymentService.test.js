@@ -108,25 +108,37 @@ test('revenue collection preflights the persisted target and provider snapshot b
   assert.equal(calls[2].input.transaction_id, attemptId)
 })
 
-test('collection target preflight rejection fails the persisted attempt without calling the provider', async () => {
+test('stale provider account version fails ITC preflight before calling the provider', async () => {
   const updates = []
   const preflightPayloads = []
   let providerCalls = 0
   const link = {
     ...baseLink,
     created_by_customer_id: '50000000-0000-4000-8000-000000000001',
-    collection_target_type: 'CUSTOMER_CREDIT',
-    customer_id: '50000000-0000-4000-8000-000000000002',
+    collection_target_type: 'REVENUE',
+    revenue_account_code: '4000',
+  }
+  const staleAttempt = {
+    ...baseAttempt,
+    payment_link_id: link.payment_link_id,
+    created_by_customer_id: link.created_by_customer_id,
+    collection_target_type: link.collection_target_type,
+    revenue_account_code: link.revenue_account_code,
+    provider_account_id: providerAccountIdentity.provider_account_id,
+    provider_account_version: providerAccountIdentity.provider_account_version,
   }
   const service = createPublicPaymentService({
     repository: {
       getPublicLink: async () => link,
-      createAttempt: async () => ({ link, attempt: { ...baseAttempt, payment_link_id: link.payment_link_id }, replayed: false }),
-      updateAttempt: async (_id, update) => { updates.push(update); return { ...baseAttempt, ...update } },
+      createAttempt: async () => ({ link, attempt: staleAttempt, replayed: false }),
+      updateAttempt: async (_id, update) => { updates.push(update); return { ...staleAttempt, ...update } },
     },
     itcFinanceClient: { preflightCollectionTarget: async (payload) => {
       preflightPayloads.push(payload)
-      throw Object.assign(new Error('unsafe details'), { code: 'CUSTOMER_CREDIT_NOT_READY', statusCode: 409 })
+      if (payload.provider_account_version !== 3) {
+        throw Object.assign(new Error('unsafe details'), { code: 'PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE', statusCode: 503 })
+      }
+      return { ready: true }
     } },
     idFactory: () => attemptId,
     providerRegistry: {
@@ -140,9 +152,11 @@ test('collection target preflight rejection fails the persisted attempt without 
 
   assert.equal(result.attempt.status, 'FAILED')
   assert.equal(providerCalls, 0)
-  assert.deepEqual(preflightPayloads[0].target, { type: 'CUSTOMER_CREDIT', customer_id: link.customer_id })
+  assert.equal(preflightPayloads[0].provider_account_id, providerAccountIdentity.provider_account_id)
+  assert.equal(preflightPayloads[0].provider_account_version, 2)
+  assert.deepEqual(preflightPayloads[0].target, { type: 'REVENUE', revenue_account_code: link.revenue_account_code })
   assert.deepEqual(updates[0], {
-    state: 'FAILED', providerStatus: 'ITC_PREFLIGHT_REJECTED', errorCode: 'CUSTOMER_CREDIT_NOT_READY',
+    state: 'FAILED', providerStatus: 'ITC_PREFLIGHT_REJECTED', errorCode: 'PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE',
   })
 })
 
@@ -353,6 +367,7 @@ test('integer PawaPay amount evidence matches the fixed two-decimal ledger amoun
 
 test('post-success ITC failure stays unreceipted and refresh retries the same posting identity', async () => {
   const itcCalls = []
+  const diagnostics = []
   let providerCalls = 0
   const attempt = {
     ...baseAttempt,
@@ -364,6 +379,8 @@ test('post-success ITC failure stays unreceipted and refresh retries the same po
     provider_evidence_digest: 'a'.repeat(64),
     verified_at: '2026-10-15T12:01:00.000Z',
   }
+  const originalError = console.error
+  console.error = (line) => diagnostics.push(JSON.parse(line))
   const service = createPublicPaymentService({
     repository: {
       getPublicAttempt: async () => attempt,
@@ -376,18 +393,28 @@ test('post-success ITC failure stays unreceipted and refresh retries the same po
     } },
     providerRegistry: { get: () => ({ initiateDeposit: async () => null, getDepositStatus: async () => { providerCalls++; return null } }) },
   })
-  const firstResult = await service.refreshAttempt(token, attemptId)
-  assert.equal(firstResult.status, 'VERIFYING_LEDGER')
-  assert.equal(firstResult.receipt_available, false)
-  assert.equal(itcCalls.length, 1)
+  try {
+    const firstResult = await service.refreshAttempt(token, attemptId)
+    assert.equal(firstResult.status, 'VERIFYING_LEDGER')
+    assert.equal(firstResult.receipt_available, false)
+    assert.equal(itcCalls.length, 1)
+    assert.deepEqual(diagnostics, [{
+      event: 'payment_link_ledger_post_failed',
+      attempt_id: attemptId,
+      error_code: 'ITC_FINANCE_UNAVAILABLE',
+      http_status: null,
+    }])
 
-  const result = await service.refreshAttempt(token, attemptId)
-  assert.equal(result.status, 'SUCCEEDED')
-  assert.equal(result.receipt_available, true)
-  assert.equal(providerCalls, 0)
-  assert.equal(itcCalls.length, 2)
-  assert.deepEqual(itcCalls[0], itcCalls[1])
-  assert.deepEqual(itcCalls[0].payload.target, { type: 'CUSTOMER_CREDIT', customer_id: attempt.customer_id })
+    const result = await service.refreshAttempt(token, attemptId)
+    assert.equal(result.status, 'SUCCEEDED')
+    assert.equal(result.receipt_available, true)
+    assert.equal(providerCalls, 0)
+    assert.equal(itcCalls.length, 2)
+    assert.deepEqual(itcCalls[0], itcCalls[1])
+    assert.deepEqual(itcCalls[0].payload.target, { type: 'CUSTOMER_CREDIT', customer_id: attempt.customer_id })
+  } finally {
+    console.error = originalError
+  }
 })
 
 test('provider success with mismatched destination remains unknown and uncredited', async () => {

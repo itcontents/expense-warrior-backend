@@ -58,7 +58,7 @@ function createPayoutDestinationService({ repository, phoneVault, providerRegist
     },
     async getMine(actor) {
       assertActor(actor)
-      if (!['staff', 'admin'].includes(String(actor.role || '').toLowerCase())) throw new PayoutDestinationError('FORBIDDEN', 403)
+      if (!['staff', 'manager', 'admin'].includes(String(actor.role || '').toLowerCase())) throw new PayoutDestinationError('FORBIDDEN', 403)
       return repository.getCurrentForStaff(String(actor.customerId).toLowerCase())
     },
   })

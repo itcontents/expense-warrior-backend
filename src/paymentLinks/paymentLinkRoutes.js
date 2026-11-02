@@ -21,7 +21,7 @@ const customerSearchSchema = Joi.object({
 }).unknown(false)
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient } = {}) {
+function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient, logger = console } = {}) {
   if (!paymentLinkService || typeof paymentLinkService.createLink !== 'function' || typeof paymentLinkService.listLinks !== 'function' || typeof paymentLinkService.disableLink !== 'function') throw new TypeError('Payment-link service is required')
   const router = express.Router()
   const requireSession = createRequireItcSession(identityClient)
@@ -89,7 +89,21 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
       const result = await paymentLinkService.createLink(req.actor, { ...value, publicToken: value.public_token }, idempotencyKey)
       res.set('Cache-Control', 'private, no-store')
       return res.status(result.replayed ? 200 : 201).json({ data: { link: result.link, token: result.token } })
-    } catch (cause) { return fail(res, cause) }
+    } catch (cause) {
+      if (cause instanceof PaymentLinkError && cause.cause) {
+        const databaseCode = typeof cause.cause.code === 'string' && /^[A-Z0-9_]{1,16}$/.test(cause.cause.code)
+          ? cause.cause.code
+          : undefined
+        logger.error?.(JSON.stringify({
+          event: 'payment_link_create_failed',
+          request_id: req.requestId,
+          error_code: cause.code,
+          ...(cause.operation ? { operation: cause.operation } : {}),
+          ...(databaseCode ? { database_error_code: databaseCode } : {}),
+        }))
+      }
+      return fail(res, cause)
+    }
   })
   router.post('/payment-links/:link_id/disable', requireSession, adminOnly, async (req, res) => {
     if (!UUID.test(req.params.link_id)) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_LINK', message: 'The payment link is invalid' } })

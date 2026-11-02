@@ -1,7 +1,10 @@
 const { PDFDocument } = require('pdfkit')
+const path = require('node:path')
+
+const receiptLogoPath = path.resolve(__dirname, '../assets/forgetech-logo-receipt.jpg')
 
 function createPaymentReceiptPdf(receipt) {
-  const doc = new PDFDocument({ size: 'A5', margin: 36, compress: true, info: { Title: 'Expense Warrior payment receipt' } })
+  const doc = new PDFDocument({ size: 'A5', margin: 36, compress: true, info: { Title: 'Forgetech Systems payment receipt' } })
   const chunks = []
   const completed = new Promise((resolve, reject) => {
     doc.on('data', (chunk) => chunks.push(chunk))
@@ -9,8 +12,8 @@ function createPaymentReceiptPdf(receipt) {
     doc.on('error', reject)
   })
 
-  doc.font('Helvetica-Bold').fontSize(19).fillColor('#18382e').text('Expense Warrior')
-  doc.moveDown(0.7)
+  doc.image(receiptLogoPath, 36, 30, { fit: [220, 66], align: 'left', valign: 'center' })
+  doc.y = 108
   doc.font('Helvetica-Bold').fontSize(15).fillColor('#17866c').text('Payment received')
   doc.moveDown(0.3)
   doc.font('Helvetica-Bold').fontSize(23).fillColor('#18382e').text(`${receipt.amount} ${receipt.currency}`)
@@ -30,7 +33,7 @@ function createPaymentReceiptPdf(receipt) {
   }
   doc.moveDown(0.6)
   doc.font('Helvetica').fontSize(8).fillColor('#718078')
-    .text('This receipt confirms a payment recorded in the company petty-cash ledger.')
+    .text('This receipt confirms your payment to Forgetech Systems.')
   doc.end()
   return completed
 }

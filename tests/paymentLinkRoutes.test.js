@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const express = require('express')
 const { createPaymentLinkRouter } = require('../src/paymentLinks/paymentLinkRoutes')
+const { PaymentLinkError } = require('../src/paymentLinks/paymentLinkService')
 
 async function listen(app) {
   const server = app.listen(0, '127.0.0.1')
@@ -39,6 +40,35 @@ test('payment-link management is admin-only and creates a fixed amount reusable 
   assert.equal(calls[0].actor.customerId, 'admin-id')
   assert.equal(calls[0].idempotencyKey, 'c3d5fcb6-9424-41b8-9f8b-5f14bb8e3f66')
   assert.deepEqual(calls[0].input.target, { type: 'REVENUE', revenue_account_code: '4000' })
+})
+
+test('payment-link create logs only request id and database error code when persistence fails', async (t) => {
+  const logs = []
+  const app = express()
+  app.use(express.json())
+  app.use((req, _res, next) => { req.requestId = 'trace-payment-create'; next() })
+  app.use(createPaymentLinkRouter({
+    identityClient: { getSession: async () => ({ customerId: 'admin-id', role: 'admin', active: true }) },
+    paymentLinkService: {
+      createLink: async () => { throw new PaymentLinkError('PAYMENT_LINK_CREATE_UNAVAILABLE', 503, { cause: Object.assign(new Error('private database detail'), { code: '42501' }), operation: 'payment_link_insert' }) },
+      listLinks: async () => ({ items: [] }),
+      disableLink: async () => ({}),
+    },
+    itcFinanceClient: { getRevenueAccounts: async () => [{ account_code: '4000' }] },
+    logger: { error: (line) => logs.push(JSON.parse(line)) },
+  }))
+  const { server, url } = await listen(app)
+  t.after(() => server.close())
+
+  const response = await fetch(`${url}/payment-links`, {
+    method: 'POST', headers: { cookie: 'itc_expense_warrior_access=admin', 'content-type': 'application/json', 'Idempotency-Key': 'c3d5fcb6-9424-41b8-9f8b-5f14bb8e3f66' },
+    body: JSON.stringify({ amount: '250.00', description: 'Office petty cash top-up', public_token: 'a'.repeat(64), target: { type: 'REVENUE', revenue_account_code: '4000' } }),
+  })
+
+  assert.equal(response.status, 503)
+  assert.equal((await response.json()).error.code, 'PAYMENT_LINK_CREATE_UNAVAILABLE')
+  assert.deepEqual(logs, [{ event: 'payment_link_create_failed', request_id: 'trace-payment-create', error_code: 'PAYMENT_LINK_CREATE_UNAVAILABLE', operation: 'payment_link_insert', database_error_code: '42501' }])
+  assert.equal(JSON.stringify(logs).includes('private database detail'), false)
 })
 
 test('A/R link creation and receivable APIs are removed from V1', async (t) => {

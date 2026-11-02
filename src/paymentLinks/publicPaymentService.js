@@ -376,6 +376,16 @@ async function postConfirmedCollection(repository, itcFinanceClient, attempt) {
       throw new PaymentLinkError('PAYMENT_LINK_NOT_AVAILABLE', 404)
     }
   } catch (_error) {
+    const errorCode = /^[A-Z0-9_]{1,100}$/.test(String(_error?.code || ''))
+      ? _error.code
+      : 'ITC_COLLECTION_POST_FAILED'
+    const status = Number(_error?.statusCode)
+    console.error(JSON.stringify({
+      event: 'payment_link_ledger_post_failed',
+      attempt_id: attempt.attempt_id,
+      error_code: errorCode,
+      http_status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+    }))
     return attempt
   }
   const operationId = result?.operation?.operation_id

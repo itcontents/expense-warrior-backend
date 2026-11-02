@@ -48,9 +48,9 @@ function createRequestRouter({ identityClient, requestService, pool, attachmentS
 
   router.get('/me', requireSession, async (req, res) => {
     const role = String(req.actor.role || '').toLowerCase()
-    const canRequest = role === 'staff'
+    const canRequest = ['staff', 'manager', 'admin'].includes(role)
     let canViewApprovals = role === 'admin'
-    if (role === 'staff') {
+    if (['staff', 'manager'].includes(role)) {
       try {
         const result = await pool.query(`
           SELECT EXISTS (

@@ -5,7 +5,7 @@ const { Pool } = require('pg')
 
 require('dotenv').config()
 const { loadConfig } = require('../src/config/env')
-const { createPaymentLinkRepository } = require('../src/paymentLinks/paymentLinkRepository')
+const { CREATE_IDEMPOTENCY_LOOKUP_SQL, createPaymentLinkRepository } = require('../src/paymentLinks/paymentLinkRepository')
 const { createTemporaryTables } = require('./helpers/postgresTestSchema')
 
 const enabled = process.env.EW_RUN_POSTGRES_TESTS === '1'
@@ -15,6 +15,30 @@ const TABLES = Object.freeze([
   'payment_link_attempts',
   'audit_events',
 ])
+
+test('payment-link idempotency lookup works with SELECT-only runtime permission', { skip: !enabled }, async () => {
+  const pool = new Pool({ ...loadConfig().database, max: 1, application_name: 'expense-warrior-idempotency-permission-test' })
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN READ ONLY')
+    const identity = await client.query(`
+      SELECT current_database() AS database, current_user AS role,
+             has_table_privilege(current_user, 'public.payment_link_creation_requests', 'SELECT') AS can_select,
+             has_table_privilege(current_user, 'public.payment_link_creation_requests', 'UPDATE') AS can_update
+    `)
+    assert.equal(identity.rows[0]?.database, 'expense_warrior')
+    assert.equal(identity.rows[0]?.role, 'expense_warrior_app')
+    assert.equal(identity.rows[0]?.can_select, true)
+    assert.equal(identity.rows[0]?.can_update, false)
+    assert.doesNotMatch(CREATE_IDEMPOTENCY_LOOKUP_SQL, /FOR UPDATE/i)
+    const result = await client.query(CREATE_IDEMPOTENCY_LOOKUP_SQL, [randomUUID(), randomUUID()])
+    assert.equal(result.rowCount, 0)
+  } finally {
+    await client.query('ROLLBACK').catch(() => {})
+    client.release()
+    await pool.end()
+  }
+})
 
 test('payment-link repository persists idempotent links and verified collections in temporary PostgreSQL tables', { skip: !enabled }, async () => {
   const pool = new Pool({ ...loadConfig().database, max: 1, application_name: 'expense-warrior-payment-link-postgres-test' })

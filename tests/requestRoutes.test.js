@@ -38,6 +38,20 @@ test('requestRoutes_requiresIdentityBeforeRequestSubmission', async () => {
   })
 })
 
+test('requestRoutes_advertisesRequestAccessToAdminsAndManagers', async () => {
+  for (const role of ['admin', 'manager']) {
+    const { app } = appFor(role)
+    await withServer(app, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/v1/expense-warrior/me`, {
+        headers: { Cookie: 'itc_expense_warrior_access=valid' },
+      })
+      const body = await response.json()
+      assert.equal(response.status, 200)
+      assert.equal(body.data.can_request, true, `${role} should be allowed to request funds`)
+    })
+  }
+})
+
 test('requestRoutes_servesAuthorizedEvidenceInlineAsTheValidatedImageType', async () => {
   const actorId = 'f437d2e8-b1dd-4e68-9e73-457889e17dbd'
   const requestId = 'a437d2e8-b1dd-4e68-9e73-457889e17dbd'

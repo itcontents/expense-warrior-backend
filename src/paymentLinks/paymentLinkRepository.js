@@ -1,5 +1,14 @@
 const { PaymentLinkError } = require('./paymentLinkService')
 
+const CREATE_IDEMPOTENCY_LOOKUP_SQL = `
+  SELECT i.request_fingerprint, l.payment_link_id, l.amount::text, l.currency, l.description,
+         l.status, l.created_at, l.collection_target_type, l.revenue_account_code,
+         l.customer_id
+    FROM payment_link_creation_requests i
+    JOIN payment_links l ON l.payment_link_id = i.payment_link_id
+   WHERE i.actor_customer_id = $1 AND i.idempotency_key = $2
+`
+
 function createPaymentLinkRepository({ pool } = {}) {
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('A PostgreSQL pool is required')
   return Object.freeze({
@@ -156,17 +165,11 @@ function createPaymentLinkRepository({ pool } = {}) {
     },
     async create({ amount, description, target, tokenHash, idempotencyKey, requestFingerprint, actorCustomerId }) {
       const client = await pool.connect()
+      let operation = 'begin'
       try {
         await client.query('BEGIN')
-        const priorResult = await client.query(`
-          SELECT i.request_fingerprint, l.payment_link_id, l.amount::text, l.currency, l.description,
-                 l.status, l.created_at, l.collection_target_type, l.revenue_account_code,
-                 l.customer_id
-            FROM payment_link_creation_requests i
-            JOIN payment_links l ON l.payment_link_id = i.payment_link_id
-           WHERE i.actor_customer_id = $1 AND i.idempotency_key = $2
-           FOR UPDATE OF i
-        `, [actorCustomerId, idempotencyKey])
+        operation = 'idempotency_lookup'
+        const priorResult = await client.query(CREATE_IDEMPOTENCY_LOOKUP_SQL, [actorCustomerId, idempotencyKey])
         const prior = priorResult.rows[0]
         if (prior) {
           if (prior.request_fingerprint !== requestFingerprint) throw new PaymentLinkError('IDEMPOTENCY_CONFLICT', 409)
@@ -174,6 +177,7 @@ function createPaymentLinkRepository({ pool } = {}) {
           const { request_fingerprint: _fingerprint, ...link } = prior
           return { link, replayed: true }
         }
+        operation = 'payment_link_insert'
         const result = await client.query(`
           INSERT INTO payment_links (
             amount, currency, description, public_token_hash, status, created_by_customer_id,
@@ -184,6 +188,7 @@ function createPaymentLinkRepository({ pool } = {}) {
         `, [amount, description, tokenHash, actorCustomerId, target.type,
           target.revenueAccountCode || null, target.customerId || null])
         const link = result.rows[0]
+        operation = 'audit_insert'
         await client.query(`
           INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
           VALUES ($1, 'payment_link.created', 'payment_link', $2, $3::jsonb)
@@ -191,16 +196,21 @@ function createPaymentLinkRepository({ pool } = {}) {
           amount: link.amount, currency: link.currency, collection_target_type: target.type,
           revenue_account_code: target.revenueAccountCode || null, customer_id: target.customerId || null,
         })])
+        operation = 'creation_request_insert'
         await client.query(`
           INSERT INTO payment_link_creation_requests (actor_customer_id, idempotency_key, request_fingerprint, payment_link_id)
           VALUES ($1, $2, $3, $4)
         `, [actorCustomerId, idempotencyKey, requestFingerprint, link.payment_link_id])
+        operation = 'commit'
         await client.query('COMMIT')
         return { link, replayed: false }
       } catch (error) {
         await client.query('ROLLBACK').catch(() => {})
         if (error instanceof PaymentLinkError) throw error
+        const failedOperation = operation
+        let recoveryError = null
         if (error?.code === '23505') {
+          operation = 'idempotency_recovery_lookup'
           const priorResult = await pool.query(`
             SELECT i.request_fingerprint, l.payment_link_id, l.amount::text, l.currency, l.description,
                    l.status, l.created_at, l.collection_target_type, l.revenue_account_code,
@@ -209,7 +219,10 @@ function createPaymentLinkRepository({ pool } = {}) {
               JOIN payment_links l ON l.payment_link_id = i.payment_link_id
              WHERE i.actor_customer_id = $1 AND i.idempotency_key = $2
              LIMIT 1
-          `, [actorCustomerId, idempotencyKey]).catch(() => ({ rows: [] }))
+          `, [actorCustomerId, idempotencyKey]).catch((cause) => {
+            recoveryError = cause
+            return { rows: [] }
+          })
           const prior = priorResult.rows[0]
           if (prior) {
             if (prior.request_fingerprint !== requestFingerprint) throw new PaymentLinkError('IDEMPOTENCY_CONFLICT', 409)
@@ -217,7 +230,10 @@ function createPaymentLinkRepository({ pool } = {}) {
             return { link, replayed: true }
           }
         }
-        throw new PaymentLinkError('PAYMENT_LINK_CREATE_UNAVAILABLE')
+        throw new PaymentLinkError('PAYMENT_LINK_CREATE_UNAVAILABLE', 503, {
+          cause: recoveryError || error,
+          operation: recoveryError ? 'idempotency_recovery_lookup' : failedOperation,
+        })
       } finally { client.release() }
     },
     async list({ limit = 50, offset = 0 } = {}) {
@@ -266,4 +282,4 @@ function createPaymentLinkRepository({ pool } = {}) {
   })
 }
 
-module.exports = { createPaymentLinkRepository }
+module.exports = { CREATE_IDEMPOTENCY_LOOKUP_SQL, createPaymentLinkRepository }

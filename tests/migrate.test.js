@@ -5,7 +5,7 @@ const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 
-const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations } = require('../src/db/migrate')
+const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, canRecoverPartialRuntimePermissions, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations } = require('../src/db/migrate')
 
 const migrationTarget = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator', schema: 'public', searchPath: 'public, pg_temp' }
 
@@ -136,6 +136,27 @@ test('assertMigrationAllowed_requiresExplicitConfirmation', () => {
     (error) => error.code === 'MIGRATION_CONFIRMATION_REQUIRED'
   )
   assert.doesNotThrow(() => assertMigrationAllowed({ CONFIRM_EXPENSE_WARRIOR_MIGRATIONS: 'APPLY' }))
+})
+
+test('partial migration recovery is limited to exact 0018 with permission-only postcondition failures', () => {
+  const migration = {
+    name: '0018_runtime_role_permissions.sql',
+    checksum: 'e7bc9a7010d997d03e4542f883f65e8668838c23e041dd516f396ac36cc83fe0',
+  }
+  const status = {
+    blockers: ['PARTIAL_MIGRATION_SCHEMA'],
+    pending: [{ name: migration.name }],
+    postconditions: [{
+      migration: migration.name,
+      passed: false,
+      failedChecks: ['privilege:payment_link_creation_requests.expense_warrior_app.SELECT', 'column-privilege:expense_requests.amount.expense_warrior_app.UPDATE'],
+    }],
+  }
+  assert.equal(canRecoverPartialRuntimePermissions(status, [migration]), true)
+  assert.equal(canRecoverPartialRuntimePermissions({ ...status, blockers: ['POSTCONDITION_FAILED', 'PARTIAL_MIGRATION_SCHEMA'] }, [migration]), false)
+  assert.equal(canRecoverPartialRuntimePermissions({ ...status, postconditions: [{ ...status.postconditions[0], failedChecks: ['relation:payment_link_creation_requests'] }] }, [migration]), false)
+  assert.equal(canRecoverPartialRuntimePermissions(status, [{ ...migration, checksum: '0'.repeat(64) }]), false)
+  assert.equal(canRecoverPartialRuntimePermissions({ ...status, pending: [{ name: '0002_expense_requests.sql' }] }, [migration]), false)
 })
 
 test('getMigrationDatabaseConfig fails closed without a separate migration identity', () => {

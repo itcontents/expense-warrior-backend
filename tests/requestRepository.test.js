@@ -124,6 +124,40 @@ test('submitRequest_snapshotsAssignedManagerAndRoutesToManagerFirst', async () =
   assert.equal(insert.values[10], '9783')
 })
 
+test('submitRequest_routesAdminRequestsToPeerAdminWithTheirPayoutDestination', async () => {
+  const admin = { ...actor, role: 'admin' }
+  let insertValues
+  const { calls, pool } = fakePool((sql, values) => {
+    if (sql.includes('INSERT INTO idempotency_records')) return { rowCount: 1, rows: [{ idempotency_key: key }] }
+    if (sql.includes('FROM expense_categories')) return { rowCount: 1, rows: [{ category_id: request.categoryId, parent_category_id: null, reason_required: false, attachment_required: false }] }
+    if (sql.includes('INSERT INTO expense_requests')) {
+      insertValues = values
+      return { rowCount: 1, rows: [{ request_id: '6a168a4e-65ca-4887-9a9c-6137a8002aba', status: 'PENDING_ADMIN' }] }
+    }
+    return { rowCount: 1, rows: [] }
+  })
+  const repository = createRequestRepository({ pool })
+
+  const result = await repository.submit({ actor: admin, request, idempotencyKey: key })
+
+  assert.equal(result.request.status, 'PENDING_ADMIN')
+  assert.ok(calls.some((call) => call.sql.includes('FROM staff_payout_destinations')))
+  assert.equal(insertValues[5], '89f85a3c-6bf8-4976-8cdc-2ec2ca88c929')
+  assert.equal(insertValues[6], 'pawapay')
+})
+
+test('submitRequest_requiresAdminPayoutDestinationBeforeCreatingRequest', async () => {
+  const { pool } = fakePool((sql) => {
+    if (sql.includes('INSERT INTO idempotency_records')) return { rowCount: 1, rows: [{ idempotency_key: key }] }
+    if (sql.includes('FROM expense_categories')) return { rowCount: 1, rows: [{ category_id: request.categoryId, parent_category_id: null, reason_required: false, attachment_required: false }] }
+    if (sql.includes('FROM staff_payout_destinations')) return { noDestination: true, rows: [] }
+    return { rowCount: 1, rows: [] }
+  })
+  const repository = createRequestRepository({ pool })
+
+  await assert.rejects(repository.submit({ actor: { ...actor, role: 'admin' }, request, idempotencyKey: key }), { code: 'PAYOUT_DESTINATION_REQUIRED' })
+})
+
 test('submitRequest_rejectsWhenStaffHasNoCurrentPayoutDestination', async () => {
   const { calls, pool } = fakePool((sql) => {
     if (sql.includes('INSERT INTO idempotency_records')) return { rowCount: 1, rows: [{ idempotency_key: key }] }
@@ -211,6 +245,20 @@ test('listRequests_appliesActorScopePaginationAndAllowlistedSort', async () => {
   assert.match(call.sql, /r\.reviewer_manager_customer_id\s*=\s*\$2/)
   assert.match(call.sql, /LIMIT \$3 OFFSET \$4/)
   assert.deepEqual(call.values, ['staff', actor.customerId, 26, 50])
+})
+
+test('listRequests_adminHistoryIsLimitedToTheirOwnRequests', async () => {
+  let call
+  const pool = { connect: async () => assert.fail('list query should not open a transaction'), query: async (sql, values) => { call = { sql, values }; return { rows: [] } } }
+  const repository = createRequestRepository({ pool })
+  await repository.listForActor({
+    actor: { ...actor, role: 'admin' },
+    filters: { limit: 25, offset: 0, sort: 'created_at', direction: 'desc' },
+  })
+
+  assert.match(call.sql, /WHERE r\.requester_customer_id\s*=\s*\$2/)
+  assert.doesNotMatch(call.sql, /\$1::text\s*=\s*'admin'\s+OR/)
+  assert.deepEqual(call.values, ['admin', actor.customerId, 26, 0])
 })
 
 test('listRequests_exposesOnlyTerminalPayoutFailureCodesWithinTheActorScopedList', async () => {

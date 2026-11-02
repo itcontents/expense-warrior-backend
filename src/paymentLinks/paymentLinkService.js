@@ -22,7 +22,12 @@ function normalizeCollectionTarget(target) {
 }
 
 class PaymentLinkError extends Error {
-  constructor(code, statusCode = 503) { super(code); this.code = code; this.statusCode = statusCode }
+  constructor(code, statusCode = 503, options = {}) {
+    super(code, options)
+    this.code = code
+    this.statusCode = statusCode
+    this.operation = options.operation || null
+  }
 }
 
 function createPaymentLinkService({ repository, hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex') } = {}) {

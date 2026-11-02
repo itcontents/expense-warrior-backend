@@ -160,7 +160,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
     app.use('/api/v1/expense-warrior', createRequestRouter({ identityClient, requestService, pool, attachmentStorage, staffPayoutsEnabled }))
     app.use('/api/v1/expense-warrior', createManagerAssignmentRouter({ identityClient, assignmentService: managerAssignmentService }))
     app.use('/api/v1/expense-warrior', createReportRouter({ identityClient, reportService }))
-    if (paymentLinkService) app.use('/api/v1/expense-warrior/admin', createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient }))
+    if (paymentLinkService) app.use('/api/v1/expense-warrior/admin', createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient, logger }))
   }
 
   app.use((_req, res) => res.status(404).json({
