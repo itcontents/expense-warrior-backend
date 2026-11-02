@@ -40,7 +40,7 @@ test('managerCandidates_requiresAdminAndValidatesSearchBeforeCallingItc', async 
   const { app } = buildApp('staff', { listStaffDirectory: async () => { calls += 1; return [] } })
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-candidates?search=x`, {
-      headers: { Cookie: 'itc_backoffice_access=valid' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid' },
     })
     assert.equal(response.status, 403)
     assert.equal((await response.json()).error.code, 'FORBIDDEN')
@@ -54,7 +54,7 @@ test('managerCandidates_adminCanSearchEligibleStaffThroughItc', async () => {
   const { app } = buildApp('admin', { listStaffDirectory: async (_cookie, filters, requestId) => { input = { filters, requestId }; return staff } })
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-candidates?search=sam&limit=10&offset=20`, {
-      headers: { Cookie: 'itc_backoffice_access=valid', 'X-Request-Id': 'candidate-search-1' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid', 'X-Request-Id': 'candidate-search-1' },
     })
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { data: { items: staff } })
@@ -68,7 +68,7 @@ test('managerAssignments_rejectsNonAdminBeforeDatabaseTransaction', async () => 
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, {
       method: 'POST',
-      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ staff_customer_id: '45a79d36-1c70-4622-84d2-145a26f288d3', manager_customer_id: '8c1e1275-0a6d-4e0e-9176-3f6d46ab9986' }),
     })
     assert.equal(response.status, 403)
@@ -91,7 +91,7 @@ test('managerAssignments_refusesInactiveOrNonCompanyDirectoryIdsBeforeDatabaseWr
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, {
       method: 'POST',
-      headers: { Cookie: 'itc_backoffice_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json' },
       body: JSON.stringify({ staff_customer_id: '8c1e1275-0a6d-4e0e-9176-3f6d46ab9986', manager_customer_id: 'c8da2d30-9805-4f51-9f6c-5bca3ff77a01' }),
     })
     assert.equal(response.status, 422)
@@ -121,7 +121,7 @@ test('managerAssignments_validatesBothStaffIdsThroughItcBeforeCreatingAssignment
   await withServer(app, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, {
       method: 'POST',
-      headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json', 'X-Request-Id': 'assignment-validate-1' },
+      headers: { Cookie: 'itc_expense_warrior_access=valid', 'Content-Type': 'application/json', 'X-Request-Id': 'assignment-validate-1' },
       body: JSON.stringify({ staff_customer_id: staffId, manager_customer_id: managerId }),
     })
     assert.equal(response.status, 200)
@@ -147,7 +147,7 @@ test('managerAssignments_enrichesAssignmentRowsWithMinimalDirectoryNames', async
     },
   }))
   await withServer(app, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, { headers: { Cookie: 'itc_backoffice_access=valid' } })
+    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, { headers: { Cookie: 'itc_expense_warrior_access=valid' } })
     const payload = await response.json()
     assert.equal(response.status, 200)
     assert.equal(payload.data.items[0].staff_member.customer_id, staffId)
@@ -158,7 +158,7 @@ test('managerAssignments_enrichesAssignmentRowsWithMinimalDirectoryNames', async
 test('managerAssignments_adminCanReadCurrentAndHistoricalAssignments', async () => {
   const { app } = buildApp('admin')
   await withServer(app, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, { headers: { Cookie: 'itc_backoffice_access=valid' } })
+    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/manager-assignments`, { headers: { Cookie: 'itc_expense_warrior_access=valid' } })
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { data: { items: [] } })
   })

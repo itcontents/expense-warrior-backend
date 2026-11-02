@@ -4,7 +4,7 @@ const { createPaymentLinkRepository } = require('../src/paymentLinks/paymentLink
 const { PaymentLinkError } = require('../src/paymentLinks/paymentLinkService')
 
 function createMemoryPool() {
-  const state = { links: new Map(), requests: new Map(), auditEvents: 0, nextId: 1 }
+  const state = { links: new Map(), requests: new Map(), auditEvents: 0, nextId: 1, queries: [] }
   const requestKey = (actorId, key) => `${actorId}:${key}`
   const joinedRequest = (actorId, key) => {
     const request = state.requests.get(requestKey(actorId, key))
@@ -18,6 +18,7 @@ function createMemoryPool() {
       let snapshot
       return {
         async query(sql, params = []) {
+          state.queries.push(sql)
           if (sql.includes('BEGIN')) {
             snapshot = structuredClone(state)
             return { rows: [] }
@@ -35,7 +36,6 @@ function createMemoryPool() {
               collection_target_type: params[4],
               revenue_account_code: params[5],
               customer_id: params[6],
-              receivable_id: params[7],
             }
             state.links.set(id, link)
             return { rows: [link] }
@@ -95,6 +95,9 @@ test('payment-link repository replays the existing link without another audit ev
   assert.equal(replay.link.payment_link_id, first.link.payment_link_id)
   assert.equal(pool.state.links.size, 1)
   assert.equal(pool.state.auditEvents, 1)
+  const idempotencyLookup = pool.state.queries.find((sql) => sql.includes('SELECT i.request_fingerprint'))
+  assert.doesNotMatch(idempotencyLookup, /FOR UPDATE/i,
+    'idempotency rows are immutable; lookup must not require UPDATE privilege')
 })
 
 test('payment-link repository rejects changed content for a reused key without creating another link', async () => {
@@ -110,16 +113,14 @@ test('payment-link repository rejects changed content for a reused key without c
   assert.equal(pool.state.auditEvents, 1)
 })
 
-test('payment-link repository persists an A/R target with customer and receivable identities', async () => {
-  const pool = createMemoryPool()
-  const repository = createPaymentLinkRepository({ pool })
-  const result = await repository.create({
-    ...input,
-    target: { type: 'AR_SETTLEMENT', customerId: '50000000-0000-4000-8000-000000000001', receivableId: '60000000-0000-4000-8000-000000000002' },
-  })
-  assert.equal(result.link.collection_target_type, 'AR_SETTLEMENT')
-  assert.equal(result.link.customer_id, '50000000-0000-4000-8000-000000000001')
-  assert.equal(result.link.receivable_id, '60000000-0000-4000-8000-000000000002')
+test('payment-link repository history contains only revenue and customer-credit target fields', async () => {
+  let query
+  const repository = createPaymentLinkRepository({ pool: {
+    connect: async () => { throw new Error('unused') },
+    query: async (sql) => { query = sql; return { rows: [] } },
+  } })
+  await repository.list({ limit: 10, offset: 0 })
+  assert.doesNotMatch(query, /receivable|settled_at/i)
 })
 
 test('payment-link repository finds an existing attempt by opaque link hash and idempotency key', async () => {
@@ -136,4 +137,21 @@ test('payment-link repository finds an existing attempt by opaque link hash and 
   assert.deepEqual(result, expected)
   assert.deepEqual(query.params, ['a'.repeat(64), input.idempotencyKey])
   assert.match(query.sql, /l\.public_token_hash = \$1 AND a\.idempotency_key = \$2/)
+})
+
+test('payment-link create failure preserves the database SQLSTATE for diagnosis', async () => {
+  const databaseError = Object.assign(new Error('database permission denied'), { code: '42501' })
+  const client = {
+    async query(sql) {
+      if (sql.includes('SELECT i.request_fingerprint')) return { rows: [] }
+      if (sql.includes('INSERT INTO payment_links')) throw databaseError
+      return { rows: [] }
+    },
+    release() {},
+  }
+  const repository = createPaymentLinkRepository({ pool: { connect: async () => client, query: async () => ({ rows: [] }) } })
+
+  await assert.rejects(repository.create(input), (error) =>
+    error instanceof PaymentLinkError && error.code === 'PAYMENT_LINK_CREATE_UNAVAILABLE' &&
+    error.cause?.code === '42501' && error.operation === 'payment_link_insert')
 })

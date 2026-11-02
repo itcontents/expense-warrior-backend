@@ -11,7 +11,6 @@ const createSchema = Joi.object({
   target: Joi.alternatives().try(
     Joi.object({ type: Joi.string().valid('REVENUE').required(), revenue_account_code: Joi.string().pattern(/^\d{4}$/).required() }).unknown(false),
     Joi.object({ type: Joi.string().valid('CUSTOMER_CREDIT').required(), customer_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required() }).unknown(false),
-    Joi.object({ type: Joi.string().valid('AR_SETTLEMENT').required(), customer_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required(), receivable_id: Joi.string().pattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i).required() }).unknown(false),
   ).required(),
 }).unknown(false)
 const listSchema = Joi.object({ limit: Joi.number().integer().min(1).max(100), offset: Joi.number().integer().min(0).max(1000000) }).unknown(false)
@@ -22,7 +21,7 @@ const customerSearchSchema = Joi.object({
 }).unknown(false)
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient } = {}) {
+function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient, logger = console } = {}) {
   if (!paymentLinkService || typeof paymentLinkService.createLink !== 'function' || typeof paymentLinkService.listLinks !== 'function' || typeof paymentLinkService.disableLink !== 'function') throw new TypeError('Payment-link service is required')
   const router = express.Router()
   const requireSession = createRequireItcSession(identityClient)
@@ -53,26 +52,6 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
       const status = errorCause instanceof ItcFinanceError ? errorCause.statusCode : 503
       const code = errorCause instanceof ItcFinanceError ? errorCause.code : 'CUSTOMER_DIRECTORY_UNAVAILABLE'
       return res.status(status).json({ error: { code, message: 'Customer search is temporarily unavailable' } })
-    }
-  })
-  router.get('/payment-links/customers/:customer_id/receivables', requireSession, adminOnly, async (req, res) => {
-    if (!UUID.test(req.params.customer_id)) return res.status(400).json({ error: { code: 'INVALID_CUSTOMER_ID', message: 'Customer identifier is invalid' } })
-    if (!itcFinanceClient || typeof itcFinanceClient.getReceivables !== 'function') {
-      return res.status(503).json({ error: { code: 'RECEIVABLES_UNAVAILABLE', message: 'Delivered invoices are temporarily unavailable' } })
-    }
-    const { value, error } = Joi.object({
-      limit: Joi.number().integer().min(1).max(100).default(50),
-      cursor: Joi.string().max(512),
-    }).unknown(false).validate(req.query, { convert: true, abortEarly: false })
-    if (error) return res.status(400).json({ error: { code: 'INVALID_RECEIVABLE_FILTER', message: 'Invoice filters are invalid' } })
-    try {
-      const receivables = await itcFinanceClient.getReceivables(req.params.customer_id, { limit: value.limit, cursor: value.cursor || null }, req.requestId)
-      res.set('Cache-Control', 'private, no-store')
-      return res.status(200).json({ data: { receivables } })
-    } catch (errorCause) {
-      const status = errorCause instanceof ItcFinanceError ? errorCause.statusCode : 503
-      const code = errorCause instanceof ItcFinanceError ? errorCause.code : 'RECEIVABLES_UNAVAILABLE'
-      return res.status(status).json({ error: { code, message: 'Delivered invoices are temporarily unavailable' } })
     }
   })
   router.get('/payment-links/revenue-accounts', requireSession, adminOnly, async (req, res) => {
@@ -106,19 +85,25 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
         if (balance.customer_id.toLowerCase() !== value.target.customer_id.toLowerCase()) {
           return res.status(422).json({ error: { code: 'CUSTOMER_UNAVAILABLE', message: 'Choose an active ITC customer account' } })
         }
-      } else if (value.target.type === 'AR_SETTLEMENT') {
-        const receivable = await itcFinanceClient.getReceivable(value.target.customer_id, value.target.receivable_id, req.requestId)
-        if (receivable.customer_id.toLowerCase() !== value.target.customer_id.toLowerCase() ||
-            receivable.receivable_id.toLowerCase() !== value.target.receivable_id.toLowerCase() ||
-            receivable.currency !== 'ZMW' || !['OPEN', 'PARTIALLY_PAID', 'PARTIALLY_CREDITED'].includes(receivable.status) ||
-            receivable.outstanding_amount !== value.amount) {
-          return res.status(422).json({ error: { code: 'RECEIVABLE_UNAVAILABLE', message: 'Choose a delivered invoice with the exact outstanding ZMW balance' } })
-        }
       }
       const result = await paymentLinkService.createLink(req.actor, { ...value, publicToken: value.public_token }, idempotencyKey)
       res.set('Cache-Control', 'private, no-store')
       return res.status(result.replayed ? 200 : 201).json({ data: { link: result.link, token: result.token } })
-    } catch (cause) { return fail(res, cause) }
+    } catch (cause) {
+      if (cause instanceof PaymentLinkError && cause.cause) {
+        const databaseCode = typeof cause.cause.code === 'string' && /^[A-Z0-9_]{1,16}$/.test(cause.cause.code)
+          ? cause.cause.code
+          : undefined
+        logger.error?.(JSON.stringify({
+          event: 'payment_link_create_failed',
+          request_id: req.requestId,
+          error_code: cause.code,
+          ...(cause.operation ? { operation: cause.operation } : {}),
+          ...(databaseCode ? { database_error_code: databaseCode } : {}),
+        }))
+      }
+      return fail(res, cause)
+    }
   })
   router.post('/payment-links/:link_id/disable', requireSession, adminOnly, async (req, res) => {
     if (!UUID.test(req.params.link_id)) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_LINK', message: 'The payment link is invalid' } })

@@ -41,7 +41,7 @@ function startServer() {
     staffPayoutsEnabled: config.pawaPay.payoutsEnabled,
     browserOrigins: config.browserOrigins,
     nodeEnv: config.nodeEnv })
-  const server = app.listen(config.port, '0.0.0.0')
+  const server = app.listen(config.port, config.bindHost)
 
   const shutdown = (signal) => {
     server.close(() => {

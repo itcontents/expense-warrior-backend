@@ -18,6 +18,18 @@ When more than one name is allowlisted, also set `DB_MIGRATION_TARGETS_JSON` to 
 
 The migration connection pins its session search path to `public, pg_temp`: unqualified migration objects go into `public`, and temporary objects cannot shadow them. Preflight inventories application objects across user schemas, including empty custom schemas, tables, partitions, views, materialized views, foreign tables, sequences, indexes, functions, and user-defined types. It blocks a database with existing objects but no migration ledger. The migration role must not be a superuser or have `CREATEDB`, `CREATEROLE`, replication, or `BYPASSRLS` privileges. It needs catalog and ledger reads for preflight and only the DDL privileges required by Expense Warrior migrations on this database. Keep it out of the API process and do not commit `.env.migrations`.
 
+## Bootstrap a new Expense Warrior database
+
+The staging/server operator creates the database and two independent login roles before running the migration runner. Use the approved secret store to set distinct passwords; never put password literals in SQL copied into tickets or this document.
+
+- Database: a dedicated `expense_warrior_*` database (for staging, use `expense_warrior_staging`). Do not share it with ITC or another application.
+- `expense_warrior_migrator`: `LOGIN`, `NOINHERIT`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`; database owner (or explicitly granted the reviewed DDL rights on this dedicated database and `public` schema). It must not be a member of another privileged role.
+- `expense_warrior_app`: `LOGIN`, `NOINHERIT`, `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`; no role memberships. It must not own the database, schema, tables, or functions.
+
+Migration `0018_runtime_role_permissions.sql` grants the runtime role `CONNECT`, `public.USAGE`, and only the table/column actions used by the API. It removes `public.CREATE` and broad table privileges from `PUBLIC` and the runtime role, grants no `DELETE` or `TRUNCATE`, and leaves the migration ledger inaccessible to the runtime role. Its postconditions check the runtime role attributes, database/schema access, and all granted/denied table and column permissions. The application refuses to start unless `DB_USER=expense_warrior_app`.
+
+Configure the API `.env` to connect to the new database as `expense_warrior_app`. Configure the separate ignored `.env.migrations` with the same target tuple and `expense_warrior_migrator`. Then use the normal read-only `status` and `plan` checks, review the fresh database as `NEW_EMPTY_DATABASE`, and run the guarded apply for migrations `0001` through `0018`. Finish with `verify`; deployment is blocked if any permission postcondition fails. Do not apply these migrations on a shared ITC database. The migration runner does not create databases or roles.
+
 If an existing migration ledger is owned by another role, the database owner must grant `SELECT` on only `public.expense_warrior_schema_migrations` to `expense_warrior_migrator` before `status`, `plan`, and `verify` can inspect it. Do not grant read access to every application table. Review the ledger and object ownership before applying migrations; the migration role must have only the ledger-write and DDL rights needed for the reviewed pending migrations.
 
 ## Review and apply
@@ -52,6 +64,8 @@ Before applying to a shared or production environment:
 7. Roll out a compatible API build, check readiness and logs, then deploy the frontend.
 
 The runner asserts target identity before obtaining a non-blocking advisory lock. It rechecks schema and checksums while holding that lock, refuses replicas and unknown/duplicate ledger entries, and blocks schema objects that are ahead of or incomplete relative to the ledger. Postconditions check that expected indexes are valid and ready, required append-only triggers are enabled, and the payout retry index remains unique with its exact active-state predicate. The payout retry check constraints must remain present, validated, and consistent with the migration's allowed states. Each migration and its checksum row commit in one transaction. On a confirmed empty database, creation of the ledger and the first migration share the same transaction. Lock and statement timeouts are bounded. A failed transaction rolls back without adding a ledger row.
+
+The runner has one narrow recovery for `0018_runtime_role_permissions.sql`: when that exact source checksum is the sole pending migration, all recorded migrations match their source checksums, and the only failed postconditions are permission checks, the guarded apply reruns the idempotent grants/revokes under the normal target identity and advisory lock. It writes the 0018 ledger row only in the same transaction and verifies all 0018 postconditions before commit; any failure rolls the transaction back. No other partial schema is eligible for this recovery.
 
 ## Stop and recovery rules
 

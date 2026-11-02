@@ -1,6 +1,7 @@
 const express = require('express')
 const { randomUUID } = require('node:crypto')
 const { createCookieCsrfGuard, parseAllowedBrowserOrigins } = require('./auth/cookieCsrfGuard')
+const { createBrowserCors } = require('./auth/browserCors')
 
 function validRequestId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value)
@@ -8,7 +9,7 @@ function validRequestId(value) {
 
 function createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault,
   callbackInboxEnabled = false, callbackInboxRepository = null, collectionPaymentsEnabled = false, staffPayoutsEnabled = false,
-  browserOrigins = null, nodeEnv = process.env.NODE_ENV || 'development' }) {
+  browserOrigins = null, nodeEnv = process.env.NODE_ENV || 'development', logger = console }) {
   if (!pool || typeof pool.query !== 'function') {
     throw new TypeError('A PostgreSQL-compatible pool is required')
   }
@@ -28,6 +29,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
     res.set('Referrer-Policy', 'no-referrer')
     next()
   })
+  app.use(createBrowserCors({ allowedOrigins: allowedBrowserOrigins, nodeEnv }))
   app.use(createCookieCsrfGuard({ allowedOrigins: allowedBrowserOrigins, nodeEnv }))
 
   // Provider callbacks sign raw HTTP bodies. These bounded raw parsers must run
@@ -154,11 +156,11 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
       const payoutDestinationService = createPayoutDestinationService({ repository: payoutDestinationRepository, phoneVault, providerRegistry: paymentProviders })
       app.use('/api/v1/expense-warrior', createPayoutDestinationRouter({ identityClient, destinationService: payoutDestinationService }))
     }
-    app.use('/api/v1/expense-warrior', createCategoryRouter({ pool, identityClient, itcFinanceClient }))
+    app.use('/api/v1/expense-warrior', createCategoryRouter({ pool, identityClient, itcFinanceClient, logger }))
     app.use('/api/v1/expense-warrior', createRequestRouter({ identityClient, requestService, pool, attachmentStorage, staffPayoutsEnabled }))
     app.use('/api/v1/expense-warrior', createManagerAssignmentRouter({ identityClient, assignmentService: managerAssignmentService }))
     app.use('/api/v1/expense-warrior', createReportRouter({ identityClient, reportService }))
-    if (paymentLinkService) app.use('/api/v1/expense-warrior/admin', createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient }))
+    if (paymentLinkService) app.use('/api/v1/expense-warrior/admin', createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanceClient, logger }))
   }
 
   app.use((_req, res) => res.status(404).json({

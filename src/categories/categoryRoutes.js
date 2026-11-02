@@ -7,7 +7,7 @@ const accountingMapSchema = Joi.object({
   itc_expense_category_code: Joi.string().pattern(/^[a-z][a-z0-9_]{1,49}$/).allow(null).required(),
 }).unknown(false)
 
-function createCategoryRouter({ pool, identityClient, itcFinanceClient }) {
+function createCategoryRouter({ pool, identityClient, itcFinanceClient, logger = console }) {
   const router = express.Router()
   const requireSession = createRequireItcSession(identityClient)
 
@@ -46,6 +46,7 @@ function createCategoryRouter({ pool, identityClient, itcFinanceClient }) {
     if (categoryIdError) return res.status(400).json({ error: { code: 'INVALID_CATEGORY_ID', message: 'Category ID must be a UUID' } })
     const { value, error } = accountingMapSchema.validate(req.body, { abortEarly: false, convert: false })
     if (error) return res.status(400).json({ error: { code: 'INVALID_ACCOUNTING_CATEGORY_MAP', message: 'Provide an eligible ITC accounting category or null to clear the mapping' } })
+    let stage = 'itc_catalog_revalidation'
     try {
       if (value.itc_expense_category_code !== null) {
         if (typeof itcFinanceClient?.getExpenseCategories !== 'function') throw new Error('ITC_EXPENSE_CATEGORIES_UNAVAILABLE')
@@ -54,6 +55,7 @@ function createCategoryRouter({ pool, identityClient, itcFinanceClient }) {
           return res.status(422).json({ error: { code: 'ITC_EXPENSE_CATEGORY_NOT_POSTABLE', message: 'Select an active ITC operating expense category' } })
         }
       }
+      stage = 'category_repository'
       const mapping = await setItcAccountingMap(pool, {
         actorId: req.actor.customerId,
         categoryId: req.params.category_id,
@@ -62,6 +64,16 @@ function createCategoryRouter({ pool, identityClient, itcFinanceClient }) {
       if (!mapping) return res.status(404).json({ error: { code: 'CATEGORY_NOT_FOUND', message: 'Expense category was not found' } })
       return res.status(200).json({ data: { mapping } })
     } catch (cause) {
+      const code = String(cause?.code || '')
+      const safeErrorCode = /^[0-9A-Z]{5}$/.test(code) || /^[A-Z][A-Z0-9_]{0,63}$/.test(code)
+        ? code
+        : 'UNCLASSIFIED'
+      logger.error(JSON.stringify({
+        event: 'expense_category_accounting_map_failed',
+        request_id: req.requestId,
+        stage: cause?.accountingMapStage || stage,
+        error_code: safeErrorCode,
+      }))
       if (cause?.code === 'INVENTORY_CATEGORY_REQUIRES_GRV') {
         return res.status(422).json({ error: { code: cause.code, message: 'Resale stock purchases must use the stock receiving workflow' } })
       }

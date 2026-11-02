@@ -21,7 +21,7 @@ async function withRouter(retry, run, session = actor) {
   try { await run(`http://127.0.0.1:${server.address().port}/api/v1/expense-warrior/admin/requests`) }
   finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
 }
-const headers = { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' }
+const headers = { Cookie: 'itc_expense_warrior_access=valid', 'Content-Type': 'application/json' }
 test('retry endpoint requires a session before service access', async () => {
   await withRouter(() => assert.fail('unauthenticated service call'), async (url) => {
     assert.equal((await fetch(`${url}/${requestId}/payout/retry`, { method: 'POST' })).status, 401)

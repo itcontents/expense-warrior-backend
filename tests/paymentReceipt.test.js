@@ -2,8 +2,12 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const express = require('express')
 const crypto = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
 const { createPublicPaymentRouter } = require('../src/paymentLinks/publicPaymentRoutes')
 const { createPublicPaymentService } = require('../src/paymentLinks/publicPaymentService')
+const receiptPdfSource = fs.readFileSync(path.resolve(__dirname, '../src/paymentLinks/paymentReceiptPdf.js'), 'utf8')
+const receiptLogoPath = path.resolve(__dirname, '../src/assets/forgetech-logo-light.png')
 
 const token = 'B'.repeat(43)
 const attemptId = '10000000-0000-4000-8000-000000000001'
@@ -12,6 +16,8 @@ const paidAttempt = {
   payment_link_id: '20000000-0000-4000-8000-000000000001',
   public_token_hash: crypto.createHash('sha256').update(token).digest('hex'),
   description: 'Office supplies',
+  collection_target_type: 'REVENUE',
+  revenue_account_code: '4000',
   provider_code: 'pawapay',
   provider_transaction_id: attemptId,
   provider_reference: 'provider-reference-123',
@@ -56,6 +62,7 @@ test('receipt endpoint serves a PDF only after the ledger records a verified pay
   assert.equal(response.headers.get('cache-control'), 'private, no-store')
   const pdf = Buffer.from(await response.arrayBuffer())
   assert.equal(pdf.subarray(0, 5).toString(), '%PDF-')
+  assert.ok(pdf.toString('latin1').includes('/Subtype /Image'), 'PDF embeds the company logo')
   assert.ok(pdf.length < 32768)
   assert.ok(requestedTokenHash)
   assert.equal(pdf.toString('latin1').includes('260763456789'), false)
@@ -63,6 +70,12 @@ test('receipt endpoint serves a PDF only after the ledger records a verified pay
   currentAttempt = { ...paidAttempt, state: 'VERIFIED_PENDING_LEDGER', ledger_operation_id: null }
   response = await fetch(`${url}/api/v1/expense-warrior/public/payment-links/${token}/attempts/${attemptId}/receipt`)
   assert.equal(response.status, 404)
+})
+
+test('customer receipt copy identifies Forgetech Systems without internal petty-cash terminology', () => {
+  assert.ok(fs.existsSync(receiptLogoPath), 'the original company logo is included in the backend project')
+  assert.match(receiptPdfSource, /This receipt confirms your payment to Forgetech Systems\./)
+  assert.doesNotMatch(receiptPdfSource, /petty-cash ledger/i)
 })
 
 test('receipt endpoint does not disclose another link attempt or accept malformed identifiers', async (t) => {

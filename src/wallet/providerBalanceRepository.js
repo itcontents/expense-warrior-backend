@@ -42,14 +42,18 @@ function createProviderBalanceRepository({ pool, idFactory = crypto.randomUUID }
       }
     },
 
-    async listRecent({ limit = 50, providerCode = null } = {}) {
+    async listRecent({ limit = 50, providerCode = null, cursor = null } = {}) {
       if (providerCode !== null && !/^[a-z][a-z0-9_]{1,31}$/.test(String(providerCode))) {
         throw new TypeError('A valid provider code is required')
+      }
+      if (cursor !== null && (typeof cursor !== 'object' || !Number.isFinite(Date.parse(cursor.retrievedAt)) ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(cursor.snapshotBatchId || '')))) {
+        throw new TypeError('A valid provider balance history cursor is required')
       }
       const result = await pool.query(`
         SELECT batch.snapshot_batch_id, batch.provider_code, batch.country,
                batch.provider_account_id, batch.provider_account_version,
-               batch.retrieved_at, batch.balance_count,
+               batch.retrieved_at::text AS retrieved_at, batch.balance_count,
                COALESCE(jsonb_agg(jsonb_build_object(
                  'network_code', item.network_code,
                  'currency', item.currency,
@@ -58,10 +62,11 @@ function createProviderBalanceRepository({ pool, idFactory = crypto.randomUUID }
           FROM provider_balance_snapshot_batches batch
           LEFT JOIN provider_balance_snapshot_items item USING (snapshot_batch_id)
          WHERE ($2::varchar IS NULL OR batch.provider_code = $2)
+           AND ($3::timestamptz IS NULL OR (batch.retrieved_at, batch.snapshot_batch_id) < ($3::timestamptz, $4::uuid))
          GROUP BY batch.snapshot_batch_id
          ORDER BY batch.retrieved_at DESC, batch.snapshot_batch_id DESC
          LIMIT $1
-      `, [limit, providerCode])
+      `, [limit, providerCode, cursor?.retrievedAt || null, cursor?.snapshotBatchId || null])
       return result.rows
     },
   })

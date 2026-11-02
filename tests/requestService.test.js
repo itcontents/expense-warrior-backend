@@ -124,12 +124,25 @@ test('submitRequest_rejectsUntrustedRoles', async () => {
   )
 })
 
-test('submitRequest_prohibitsAdminSelfFundedRequests', async () => {
-  const service = createRequestService({ repository: repositoryWith({ submit: async () => assert.fail('repository should not be called') }) })
-  await assert.rejects(
-    service.submitRequest({ ...actor, role: 'admin' }, { category_id: '45a79d36-1c70-4622-84d2-145a26f288d3', amount: '25.00' }, idempotencyKey),
-    (error) => error.code === 'FORBIDDEN',
-  )
+test('submitRequest_allowsAdminWithSeparateApproverAndPayoutDestination', async () => {
+  let submitted
+  const service = createRequestService({ repository: repositoryWith({ submit: async (input) => { submitted = input; return { request: { status: 'PENDING_ADMIN' } } } }) })
+  const result = await service.submitRequest({ ...actor, role: 'admin' }, {
+    category_id: '45a79d36-1c70-4622-84d2-145a26f288d3', amount: '25.00',
+  }, idempotencyKey)
+
+  assert.equal(result.request.status, 'PENDING_ADMIN')
+  assert.equal(submitted.actor.role, 'admin')
+})
+
+test('submitRequest_normalizesManagerRoleForStaffWorkflow', async () => {
+  let submitted
+  const service = createRequestService({ repository: repositoryWith({ submit: async (input) => { submitted = input; return { request: { status: 'PENDING_MANAGER' } } } }) })
+  await service.submitRequest({ ...actor, role: 'manager' }, {
+    category_id: '45a79d36-1c70-4622-84d2-145a26f288d3', amount: '25.00',
+  }, idempotencyKey)
+
+  assert.equal(submitted.actor.role, 'staff')
 })
 
 test('rejectRequest_requiresAReasonAndPassesVerifiedActorScope', async () => {

@@ -48,6 +48,6 @@ test('listRecent uses a bounded parameterized limit', async () => {
   })
   const rows = await repository.listRecent({ limit: 25, providerCode: 'pawapay' })
   assert.equal(rows[0].snapshot_batch_id, 'id')
-  assert.deepEqual(captured.values, [25, 'pawapay'])
+  assert.deepEqual(captured.values, [25, 'pawapay', null, null])
   assert.match(captured.sql, /ORDER BY batch\.retrieved_at DESC/)
 })

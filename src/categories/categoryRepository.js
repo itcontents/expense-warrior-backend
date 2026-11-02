@@ -35,16 +35,20 @@ async function listCategoriesWithAccountingMap(pool) {
 }
 
 async function setItcAccountingMap(pool, { actorId, categoryId, itcExpenseCategoryCode }) {
-  const client = await pool.connect()
+  let client
+  let stage = 'category_db_connect'
   try {
+    client = await pool.connect()
+    stage = 'transaction_begin'
     await client.query('BEGIN')
+    stage = 'category_lock'
     const currentResult = await client.query(`
       SELECT category.category_id, category.code, category.parent_category_id,
              category.itc_expense_category_code, parent.code AS parent_code
         FROM expense_categories category
         LEFT JOIN expense_categories parent ON parent.category_id = category.parent_category_id
        WHERE category.category_id = $1
-       FOR UPDATE
+       FOR UPDATE OF category
     `, [categoryId])
     const current = currentResult.rows[0]
     if (!current) {
@@ -58,9 +62,11 @@ async function setItcAccountingMap(pool, { actorId, categoryId, itcExpenseCatego
       throw error
     }
     if (current.itc_expense_category_code === itcExpenseCategoryCode) {
+      stage = 'transaction_commit'
       await client.query('COMMIT')
       return current
     }
+    stage = 'category_update'
     const updatedResult = await client.query(`
       UPDATE expense_categories
          SET itc_expense_category_code = $2,
@@ -69,6 +75,7 @@ async function setItcAccountingMap(pool, { actorId, categoryId, itcExpenseCatego
        RETURNING category_id, code, parent_category_id, itc_expense_category_code, updated_at
     `, [categoryId, itcExpenseCategoryCode])
     const updated = updatedResult.rows[0]
+    stage = 'audit_insert'
     await client.query(`
       INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
       VALUES ($1, 'expense_category.accounting_map_changed', 'expense_category', $2, $3::jsonb)
@@ -77,13 +84,15 @@ async function setItcAccountingMap(pool, { actorId, categoryId, itcExpenseCatego
       previous_itc_expense_category_code: current.itc_expense_category_code || null,
       itc_expense_category_code: itcExpenseCategoryCode,
     })])
+    stage = 'transaction_commit'
     await client.query('COMMIT')
     return updated
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (error && typeof error === 'object') error.accountingMapStage = stage
+    if (client) await client.query('ROLLBACK').catch(() => {})
     throw error
   } finally {
-    client.release()
+    client?.release()
   }
 }
 

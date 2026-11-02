@@ -81,11 +81,16 @@ test('destination route rejects non-admin assignment before identity directory l
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   try {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/expense-warrior/admin/payout-destinations/${staffId}`, {
-      method: 'PUT', headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' },
+      method: 'PUT', headers: { Cookie: 'itc_expense_warrior_access=valid', 'Content-Type': 'application/json' },
       body: JSON.stringify({ network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783' }),
     })
     assert.equal(response.status, 403)
     assert.equal((await response.json()).error.code, 'FORBIDDEN')
+    const selfDestination = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/expense-warrior/payout-destination/me`, {
+      method: 'PUT', headers: { Cookie: 'itc_expense_warrior_access=valid', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783' }),
+    })
+    assert.equal(selfDestination.status, 403)
     assert.equal(directoryCalls, 0)
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
@@ -113,7 +118,7 @@ test('destination route verifies eligible identity before returning only masked 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   try {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/expense-warrior/admin/payout-destinations/${staffId}`, {
-      method: 'PUT', headers: { Cookie: 'itc_backoffice_access=valid', 'Content-Type': 'application/json' },
+      method: 'PUT', headers: { Cookie: 'itc_expense_warrior_access=valid', 'Content-Type': 'application/json' },
       body: JSON.stringify({ network_code: 'AIRTEL_OAPI_ZMB', phone_number: '260957909783' }),
     })
     const payload = await response.json()
@@ -123,6 +128,38 @@ test('destination route verifies eligible identity before returning only masked 
     assert.equal(payload.data.destination.phone_last4, '9783')
     assert.equal(JSON.stringify(payload).includes('260957909783'), false)
     assert.equal(JSON.stringify(payload).includes('ciphertext'), false)
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  }
+})
+
+test('admin can set only their own payout destination without a staff-directory lookup', async () => {
+  let assigned
+  let directoryCalls = 0
+  const app = express()
+  app.use(express.json())
+  app.use('/api/v1/expense-warrior', createPayoutDestinationRouter({
+    identityClient: {
+      getSession: async () => admin,
+      listStaffDirectory: async () => { directoryCalls += 1; return [] },
+    },
+    destinationService: {
+      assign: async (...args) => { assigned = args; return { destination: { staff_customer_id: admin.customerId, network_code: 'MTN_MOMO_ZMB', phone_last4: '9783' }, changed: true } },
+    },
+  }))
+  const server = http.createServer(app)
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/expense-warrior/payout-destination/me`, {
+      method: 'PUT', headers: { Cookie: 'itc_expense_warrior_access=valid', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ network_code: 'MTN_MOMO_ZMB', phone_number: '260957909783' }),
+    })
+    const payload = await response.json()
+    assert.equal(response.status, 200)
+    assert.deepEqual(assigned, [admin, admin.customerId, 'MTN_MOMO_ZMB', '260957909783', 'pawapay'])
+    assert.equal(directoryCalls, 0)
+    assert.equal(payload.data.destination.phone_last4, '9783')
+    assert.equal(JSON.stringify(payload).includes('260957909783'), false)
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }

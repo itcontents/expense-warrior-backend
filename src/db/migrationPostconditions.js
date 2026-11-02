@@ -1,3 +1,71 @@
+const runtimeTables = [
+  'employee_manager_assignments', 'expense_categories', 'expense_request_attachments', 'expense_requests',
+  'expense_warrior_schema_migrations', 'idempotency_records', 'audit_events', 'payment_link_attempts',
+  'payment_link_creation_requests', 'payment_link_receivable_closures', 'payment_links',
+  'provider_balance_snapshot_batches', 'provider_balance_snapshot_items', 'provider_callback_inbox',
+  'request_decisions', 'request_payout_attempts', 'staff_payout_destinations',
+]
+const runtimeSelectTables = new Set([
+  'employee_manager_assignments', 'expense_categories', 'expense_request_attachments', 'expense_requests',
+  'idempotency_records', 'payment_link_attempts', 'payment_link_creation_requests',
+  'payment_link_receivable_closures', 'payment_links', 'provider_balance_snapshot_batches',
+  'provider_balance_snapshot_items', 'request_decisions', 'request_payout_attempts', 'staff_payout_destinations',
+])
+const runtimeInsertTables = new Set([
+  'audit_events', 'employee_manager_assignments', 'expense_request_attachments', 'expense_requests',
+  'idempotency_records', 'payment_link_attempts', 'payment_link_creation_requests',
+  'payment_link_receivable_closures', 'payment_links', 'provider_balance_snapshot_batches',
+  'provider_balance_snapshot_items', 'provider_callback_inbox', 'request_decisions',
+  'request_payout_attempts', 'staff_payout_destinations',
+])
+const runtimeUpdateTables = new Set()
+const runtimeColumnUpdates = Object.freeze({
+  employee_manager_assignments: ['effective_to'],
+  expense_categories: ['itc_expense_category_code', 'updated_at'],
+  idempotency_records: ['resource_id', 'response_json', 'completed_at'],
+  expense_requests: [
+    'finance_operation_id', 'finance_idempotency_key', 'finance_reservation_state', 'finance_error_code',
+    'finance_expense_category_code', 'finance_expense_account_code', 'payout_provider_account_id',
+    'payout_provider_account_version', 'updated_at', 'status', 'finance_hold_id',
+    'finance_release_operation_id', 'finance_release_idempotency_key', 'finance_release_state',
+    'finance_release_actor_customer_id', 'finance_release_reason', 'finance_release_error_code',
+    'manager_assignment_id', 'reviewer_manager_customer_id',
+  ],
+  payment_link_attempts: [
+    'state', 'provider_status', 'provider_reference', 'last_error_code', 'verified_at',
+    'provider_evidence_digest', 'updated_at', 'ledger_operation_id',
+  ],
+  payment_links: ['disabled_at', 'disabled_by_customer_id', 'status'],
+  request_payout_attempts: [
+    'state', 'reservation_hold_id', 'reservation_state', 'error_code', 'updated_at',
+    'provider_status', 'provider_transaction_reference', 'verified_at', 'consume_state',
+    'release_operation_id', 'release_idempotency_key', 'release_state', 'release_error_code',
+  ],
+  staff_payout_destinations: ['superseded_at'],
+})
+const runtimePrivileges = runtimeTables.flatMap((table) => ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'].map((privilege) => ({
+  table,
+  role: 'expense_warrior_app',
+  privilege,
+  granted: privilege === 'SELECT' ? runtimeSelectTables.has(table)
+    : privilege === 'INSERT' ? runtimeInsertTables.has(table)
+      : privilege === 'UPDATE' ? runtimeUpdateTables.has(table)
+        : false,
+})))
+const runtimeColumnPrivileges = runtimeTables.flatMap((table) => ['UPDATE'].flatMap((privilege) => {
+  const grantedColumns = runtimeColumnUpdates[table] || []
+  const knownColumns = table === 'employee_manager_assignments' ? ['effective_to', 'staff_customer_id']
+    : table === 'expense_categories' ? ['itc_expense_category_code', 'updated_at', 'code']
+      : table === 'idempotency_records' ? ['resource_id', 'response_json', 'completed_at', 'request_hash']
+        : table === 'expense_requests' ? [...runtimeColumnUpdates.expense_requests, 'amount', 'requester_customer_id', 'payout_phone_ciphertext']
+          : table === 'payment_link_attempts' ? [...runtimeColumnUpdates.payment_link_attempts, 'amount', 'provider_transaction_id', 'provider_account_id']
+        : table === 'payment_links' ? ['disabled_at', 'disabled_by_customer_id', 'status', 'public_token_hash']
+          : table === 'request_payout_attempts' ? [...runtimeColumnUpdates.request_payout_attempts, 'amount', 'payout_id', 'provider_account_id']
+          : table === 'staff_payout_destinations' ? ['superseded_at', 'phone_ciphertext']
+            : []
+  return knownColumns.map((column) => ({ table, column, role: 'expense_warrior_app', privilege, granted: grantedColumns.includes(column) }))
+}))
+
 const MIGRATION_POSTCONDITIONS = Object.freeze({
   '0001_expense_categories.sql': { relations: ['expense_categories', 'expense_categories_active_parent_idx'], columns: { expense_categories: ['category_id', 'parent_category_id', 'code', 'reason_required'] } },
   '0002_expense_requests.sql': { relations: ['employee_manager_assignments', 'expense_requests', 'expense_request_attachments', 'request_decisions', 'idempotency_records', 'audit_events', 'expense_requests_manager_queue_idx'], columns: { expense_requests: ['requester_customer_id', 'category_id', 'status', 'submitted_at'], expense_request_attachments: ['storage_key', 'sha256', 'uploader_customer_id'], request_decisions: ['stage', 'action', 'actor_customer_id'], idempotency_records: ['request_hash', 'response_json'], audit_events: ['metadata', 'created_at'] } },
@@ -50,6 +118,20 @@ const MIGRATION_POSTCONDITIONS = Object.freeze({
     ],
     indexes: [{ name: 'payment_link_receivable_closures_receivable_idx', table: 'payment_link_receivable_closures', unique: false, keyDefinition: 'USING btree (receivable_id, settled_at DESC, payment_link_id)', predicateValues: [] }],
   },
+  '0018_runtime_role_permissions.sql': {
+    relations: ['expense_warrior_schema_migrations'],
+    roles: [{
+      name: 'expense_warrior_app', canLogin: true, superuser: false, createDb: false, noMemberships: true,
+      createRole: false, replication: false, bypassRls: false, inherit: false,
+    }],
+    databasePrivileges: [{ role: 'expense_warrior_app', privilege: 'CONNECT', granted: true }],
+    schemaPrivileges: [
+      { schema: 'public', role: 'expense_warrior_app', privilege: 'USAGE', granted: true },
+      { schema: 'public', role: 'expense_warrior_app', privilege: 'CREATE', granted: false },
+    ],
+    privileges: runtimePrivileges,
+    columnPrivileges: runtimeColumnPrivileges,
+  },
 })
 
 async function verifyMigrationPostconditions(client, migrations) {
@@ -62,6 +144,10 @@ async function verifyMigrationPostconditions(client, migrations) {
   const criticalIndexes = new Map()
   const constraintSpecs = new Map()
   const privilegeChecks = new Map()
+  const roleChecks = new Map()
+  const databasePrivilegeChecks = new Map()
+  const schemaPrivilegeChecks = new Map()
+  const columnPrivilegeChecks = new Map()
 
   for (const migration of migrations) {
     const spec = MIGRATION_POSTCONDITIONS[migration.name]
@@ -79,6 +165,16 @@ async function verifyMigrationPostconditions(client, migrations) {
     for (const constraint of spec.constraints || []) constraintSpecs.set(constraint.name, constraint)
     for (const privilege of spec.privileges || []) {
       privilegeChecks.set(`${privilege.table}.${privilege.role}.${privilege.privilege}`, privilege)
+    }
+    for (const role of spec.roles || []) roleChecks.set(role.name, role)
+    for (const privilege of spec.databasePrivileges || []) {
+      databasePrivilegeChecks.set(`${privilege.role}.${privilege.privilege}`, privilege)
+    }
+    for (const privilege of spec.schemaPrivileges || []) {
+      schemaPrivilegeChecks.set(`${privilege.schema}.${privilege.role}.${privilege.privilege}`, privilege)
+    }
+    for (const privilege of spec.columnPrivileges || []) {
+      columnPrivilegeChecks.set(`${privilege.table}.${privilege.column}.${privilege.role}.${privilege.privilege}`, privilege)
     }
     for (const [table, columns] of Object.entries(spec.columns || {})) {
       for (const column of columns) columnPairs.set(`${table}.${column}`, { table, column })
@@ -173,14 +269,87 @@ async function verifyMigrationPostconditions(client, migrations) {
     const query = await client.query(`
       SELECT required.table_name, required.role_name, required.privilege_type,
              CASE
-               WHEN to_regclass(format('%I.%I', current_schema(), required.table_name)) IS NULL THEN NULL
-               ELSE has_table_privilege(required.role_name,
+               WHEN role.oid IS NULL OR to_regclass(format('%I.%I', current_schema(), required.table_name)) IS NULL THEN NULL
+               ELSE has_table_privilege(role.oid,
                  format('%I.%I', current_schema(), required.table_name), required.privilege_type)
              END AS is_granted
       FROM unnest($1::text[], $2::text[], $3::text[]) AS required(table_name, role_name, privilege_type)
+      LEFT JOIN pg_catalog.pg_roles role ON role.rolname = required.role_name
     `, [privileges.map(({ table }) => table), privileges.map(({ role }) => role), privileges.map(({ privilege }) => privilege)])
     for (const row of query.rows || []) {
       foundPrivileges.set(`${row.table_name}.${row.role_name}.${row.privilege_type}`, row.is_granted)
+    }
+  }
+
+  const foundRoles = new Map()
+  if (roleChecks.size) {
+    const query = await client.query(`
+      SELECT required.role_name,
+             role.rolcanlogin AS can_login,
+             role.rolsuper AS is_superuser,
+             role.rolcreatedb AS can_create_database,
+             role.rolcreaterole AS can_create_role,
+             role.rolreplication AS can_replicate,
+             role.rolbypassrls AS bypasses_row_security,
+             role.rolinherit AS inherits_privileges,
+             NOT EXISTS (
+               SELECT 1 FROM pg_catalog.pg_auth_members membership
+               WHERE membership.member = role.oid
+             ) AS has_no_memberships
+      FROM unnest($1::text[]) AS required(role_name)
+      LEFT JOIN pg_catalog.pg_roles role ON role.rolname = required.role_name
+    `, [[...roleChecks.keys()]])
+    for (const row of query.rows || []) foundRoles.set(row.role_name, row)
+  }
+
+  const foundDatabasePrivileges = new Map()
+  if (databasePrivilegeChecks.size) {
+    const privileges = [...databasePrivilegeChecks.values()]
+    const query = await client.query(`
+      SELECT required.role_name, required.privilege_type,
+             CASE WHEN role.oid IS NULL THEN NULL
+               ELSE has_database_privilege(role.oid, current_database(), required.privilege_type)
+             END AS is_granted
+      FROM unnest($1::text[], $2::text[]) AS required(role_name, privilege_type)
+      LEFT JOIN pg_catalog.pg_roles role ON role.rolname = required.role_name
+    `, [privileges.map(({ role }) => role), privileges.map(({ privilege }) => privilege)])
+    for (const row of query.rows || []) foundDatabasePrivileges.set(`${row.role_name}.${row.privilege_type}`, row.is_granted)
+  }
+
+  const foundSchemaPrivileges = new Map()
+  if (schemaPrivilegeChecks.size) {
+    const privileges = [...schemaPrivilegeChecks.values()]
+    const query = await client.query(`
+      SELECT required.schema_name, required.role_name, required.privilege_type,
+             CASE WHEN role.oid IS NULL THEN NULL
+               ELSE has_schema_privilege(role.oid, required.schema_name, required.privilege_type)
+             END AS is_granted
+      FROM unnest($1::text[], $2::text[], $3::text[]) AS required(schema_name, role_name, privilege_type)
+      LEFT JOIN pg_catalog.pg_roles role ON role.rolname = required.role_name
+    `, [privileges.map(({ schema }) => schema), privileges.map(({ role }) => role), privileges.map(({ privilege }) => privilege)])
+    for (const row of query.rows || []) foundSchemaPrivileges.set(`${row.schema_name}.${row.role_name}.${row.privilege_type}`, row.is_granted)
+  }
+
+  const foundColumnPrivileges = new Map()
+  if (columnPrivilegeChecks.size) {
+    const privileges = [...columnPrivilegeChecks.values()]
+    const query = await client.query(`
+      SELECT required.table_name, required.column_name, required.role_name, required.privilege_type,
+             CASE
+               WHEN role.oid IS NULL OR to_regclass(format('%I.%I', current_schema(), required.table_name)) IS NULL OR NOT EXISTS (
+                 SELECT 1 FROM information_schema.columns column_row
+                 WHERE column_row.table_schema = current_schema()
+                   AND column_row.table_name = required.table_name
+                   AND column_row.column_name = required.column_name
+               ) THEN NULL
+               ELSE has_column_privilege(role.oid,
+                 format('%I.%I', current_schema(), required.table_name), required.column_name, required.privilege_type)
+             END AS is_granted
+      FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS required(table_name, column_name, role_name, privilege_type)
+      LEFT JOIN pg_catalog.pg_roles role ON role.rolname = required.role_name
+    `, [privileges.map(({ table }) => table), privileges.map(({ column }) => column), privileges.map(({ role }) => role), privileges.map(({ privilege }) => privilege)])
+    for (const row of query.rows || []) {
+      foundColumnPrivileges.set(`${row.table_name}.${row.column_name}.${row.role_name}.${row.privilege_type}`, row.is_granted)
     }
   }
 
@@ -195,6 +364,21 @@ async function verifyMigrationPostconditions(client, migrations) {
       ...(spec.indexes || []).filter((index) => !(spec.relations || []).includes(index.name)).map((index) => ({ name: `index:${index.name}`, passed: isHealthyIndex(foundIndexes.get(index.name), index) })),
       ...(spec.constraints || []).map((constraint) => ({ name: `constraint:${constraint.name}`, passed: isHealthyConstraint(foundConstraints.get(constraint.name), constraint) })),
       ...(spec.privileges || []).map((privilege) => ({ name: `privilege:${privilege.table}.${privilege.role}.${privilege.privilege}`, passed: foundPrivileges.get(`${privilege.table}.${privilege.role}.${privilege.privilege}`) === privilege.granted })),
+      ...(spec.roles || []).flatMap((role) => {
+        const actual = foundRoles.get(role.name)
+        return [
+          ['can_login', role.canLogin], ['is_superuser', role.superuser],
+          ['can_create_database', role.createDb], ['can_create_role', role.createRole],
+          ['can_replicate', role.replication], ['bypasses_row_security', role.bypassRls],
+          ['inherits_privileges', role.inherit], ['has_no_memberships', role.noMemberships],
+        ].map(([attribute, expected]) => ({
+          name: `role:${role.name}:${attribute}`,
+          passed: Boolean(actual) && actual[attribute] === expected,
+        }))
+      }),
+      ...(spec.databasePrivileges || []).map((privilege) => ({ name: `database-privilege:${privilege.role}.${privilege.privilege}`, passed: foundDatabasePrivileges.get(`${privilege.role}.${privilege.privilege}`) === privilege.granted })),
+      ...(spec.schemaPrivileges || []).map((privilege) => ({ name: `schema-privilege:${privilege.schema}.${privilege.role}.${privilege.privilege}`, passed: foundSchemaPrivileges.get(`${privilege.schema}.${privilege.role}.${privilege.privilege}`) === privilege.granted })),
+      ...(spec.columnPrivileges || []).map((privilege) => ({ name: `column-privilege:${privilege.table}.${privilege.column}.${privilege.role}.${privilege.privilege}`, passed: foundColumnPrivileges.get(`${privilege.table}.${privilege.column}.${privilege.role}.${privilege.privilege}`) === privilege.granted })),
     ]
     const passed = checks.length > 0 && checks.every(({ passed: checkPassed }) => checkPassed)
     const presentCount = checks.filter(({ passed: checkPassed }) => checkPassed).length

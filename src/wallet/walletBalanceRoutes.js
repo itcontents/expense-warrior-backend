@@ -9,6 +9,24 @@ const ledgerHistorySchema = Joi.object({
   cursor: Joi.string().max(512),
 }).unknown(false)
 
+function encodeSnapshotCursor(snapshot) {
+  return Buffer.from(`${snapshot.retrieved_at}\n${snapshot.snapshot_batch_id}`, 'utf8').toString('base64url')
+}
+
+function decodeSnapshotCursor(value) {
+  if (!value) return null
+  try {
+    const decoded = Buffer.from(value, 'base64url').toString('utf8')
+    if (Buffer.from(decoded, 'utf8').toString('base64url') !== value) return undefined
+    const [retrievedAt, snapshotBatchId, ...extra] = decoded.split('\n')
+    if (extra.length || !retrievedAt || !Number.isFinite(Date.parse(retrievedAt)) ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(snapshotBatchId || '')) return undefined
+    return { retrievedAt, snapshotBatchId }
+  } catch {
+    return undefined
+  }
+}
+
 function createWalletBalanceRouter({ identityClient, walletBalanceService, itcFinanceClient, snapshotRepository = null } = {}) {
   if (!identityClient || !walletBalanceService || typeof walletBalanceService.getBalance !== 'function') {
     throw new TypeError('ITC identity and wallet balance services are required')
@@ -48,19 +66,24 @@ function createWalletBalanceRouter({ identityClient, walletBalanceService, itcFi
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Administrator access is required' } })
     }
     const schema = Joi.object({
-      limit: Joi.number().integer().min(1).max(100).default(50),
+      limit: Joi.number().integer().min(1).max(50).default(10),
       provider_code: Joi.string().pattern(/^[a-z][a-z0-9_]{1,31}$/).default('pawapay'),
+      cursor: Joi.string().max(256),
     }).unknown(false)
     const { value, error } = schema.validate(req.query, { abortEarly: false, convert: true })
     if (error) return res.status(400).json({ error: { code: 'INVALID_FILTER', message: 'Snapshot history filters are invalid' } })
+    const cursor = decodeSnapshotCursor(value.cursor)
+    if (value.cursor && !cursor) return res.status(400).json({ error: { code: 'INVALID_FILTER', message: 'Snapshot history cursor is invalid' } })
     if (!snapshotRepository || typeof snapshotRepository.listRecent !== 'function') {
       return res.status(503).json({ error: { code: 'PROVIDER_BALANCE_HISTORY_UNAVAILABLE', message: 'Provider balance history is temporarily unavailable' } })
     }
     try {
-      const snapshots = await snapshotRepository.listRecent({ limit: value.limit, providerCode: value.provider_code })
+      const rows = await snapshotRepository.listRecent({ limit: value.limit + 1, providerCode: value.provider_code, cursor })
+      const hasMore = rows.length > value.limit
+      const snapshots = hasMore ? rows.slice(0, value.limit) : rows
       res.set('Cache-Control', 'private, no-store')
       res.set('Vary', 'Cookie')
-      return res.status(200).json({ data: { snapshots } })
+      return res.status(200).json({ data: { snapshots, has_more: hasMore, next_cursor: hasMore && snapshots.length ? encodeSnapshotCursor(snapshots.at(-1)) : null } })
     } catch (error) {
       const code = /^[A-Z0-9_]{1,100}$/.test(String(error?.code || '')) ? error.code : 'PROVIDER_BALANCE_HISTORY_UNAVAILABLE'
       return res.status(503).json({ error: { code, message: 'Provider balance history is temporarily unavailable' } })

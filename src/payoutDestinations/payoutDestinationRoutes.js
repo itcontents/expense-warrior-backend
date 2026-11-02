@@ -48,6 +48,14 @@ function createPayoutDestinationRouter({ identityClient, destinationService }) {
   router.get('/payout-destination/me', requireSession, async (req, res) => {
     try { return res.status(200).json({ data: { destination: await destinationService.getMine(req.actor) } }) } catch (error) { return respondError(res, error) }
   })
+  router.put('/payout-destination/me', requireSession, requireAdmin, async (req, res) => {
+    const { value, error } = assignmentSchema.validate(req.body, { abortEarly: false, convert: true })
+    if (error) return res.status(400).json({ error: { code: 'INVALID_PAYOUT_DESTINATION', message: 'Provide a mobile money network and Zambia phone number' } })
+    try {
+      const result = await destinationService.assign(req.actor, req.actor.customerId, value.network_code, value.phone_number, value.provider_code)
+      return res.status(200).json({ data: result })
+    } catch (cause) { return respondError(res, cause) }
+  })
   return router
 }
 

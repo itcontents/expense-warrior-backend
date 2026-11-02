@@ -19,9 +19,9 @@ test('wallet balance route is admin-only and returns freshness metadata without 
   const { server, url } = await listen(app)
   t.after(() => server.close())
 
-  const forbidden = await fetch(`${url}/wallet/provider-balance`, { headers: { cookie: 'itc_backoffice_access=staff-session' } })
+  const forbidden = await fetch(`${url}/wallet/provider-balance`, { headers: { cookie: 'itc_expense_warrior_access=staff-session' } })
   assert.equal(forbidden.status, 403)
-  const response = await fetch(`${url}/wallet/provider-balance?refresh=true`, { headers: { cookie: 'itc_backoffice_access=admin-session' } })
+  const response = await fetch(`${url}/wallet/provider-balance?refresh=true`, { headers: { cookie: 'itc_expense_warrior_access=admin-session' } })
   assert.equal(response.status, 200)
   assert.equal(response.headers.get('cache-control'), 'private, no-store')
   const payload = await response.json()
@@ -39,31 +39,48 @@ test('wallet balance route rejects an unsupported refresh query before provider 
   const { server, url } = await listen(app)
   t.after(() => server.close())
 
-  const response = await fetch(`${url}/wallet/provider-balance?refresh=yes`, { headers: { cookie: 'itc_backoffice_access=valid' } })
+  const response = await fetch(`${url}/wallet/provider-balance?refresh=yes`, { headers: { cookie: 'itc_expense_warrior_access=valid' } })
   assert.equal(response.status, 400)
   assert.equal(calls, 0)
 })
 
 test('provider balance snapshot history is bounded and admin-only', async (t) => {
-  let received
+  const received = []
+  const rows = Array.from({ length: 26 }, (_, index) => ({
+    snapshot_batch_id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    retrieved_at: `2026-10-15 12:${String(index).padStart(2, '0')}:00+00`,
+  }))
   const app = express()
   app.use(createWalletBalanceRouter({
     identityClient: { getSession: async (cookie) => ({ customerId: cookie, role: cookie.includes('admin') ? 'admin' : 'staff', active: true }) },
     walletBalanceService: { getBalance: async () => ({ balances: [] }) },
-    snapshotRepository: { listRecent: async (options) => { received = options; return [{ snapshot_batch_id: 'batch-1' }] } },
+    snapshotRepository: { listRecent: async (options) => { received.push(options); return options.cursor ? rows.slice(25) : rows } },
   }))
   const { server, url } = await listen(app)
   t.after(() => server.close())
 
-  const forbidden = await fetch(`${url}/wallet/provider-balance/history`, { headers: { cookie: 'itc_backoffice_access=staff-session' } })
+  const forbidden = await fetch(`${url}/wallet/provider-balance/history`, { headers: { cookie: 'itc_expense_warrior_access=staff-session' } })
   assert.equal(forbidden.status, 403)
-  const invalid = await fetch(`${url}/wallet/provider-balance/history?limit=101`, { headers: { cookie: 'itc_backoffice_access=admin-session' } })
+  const invalid = await fetch(`${url}/wallet/provider-balance/history?limit=101`, { headers: { cookie: 'itc_expense_warrior_access=admin-session' } })
   assert.equal(invalid.status, 400)
-  const response = await fetch(`${url}/wallet/provider-balance/history?limit=25`, { headers: { cookie: 'itc_backoffice_access=admin-session' } })
+  const response = await fetch(`${url}/wallet/provider-balance/history?limit=25`, { headers: { cookie: 'itc_expense_warrior_access=admin-session' } })
   assert.equal(response.status, 200)
   assert.equal(response.headers.get('cache-control'), 'private, no-store')
-  assert.deepEqual(received, { limit: 25, providerCode: 'pawapay' })
-  assert.deepEqual((await response.json()).data.snapshots, [{ snapshot_batch_id: 'batch-1' }])
+  assert.deepEqual(received[0], { limit: 26, providerCode: 'pawapay', cursor: null })
+  const firstPage = (await response.json()).data
+  assert.equal(firstPage.snapshots.length, 25)
+  assert.equal(firstPage.has_more, true)
+  assert.equal(typeof firstPage.next_cursor, 'string')
+  const nextPageResponse = await fetch(`${url}/wallet/provider-balance/history?limit=25&cursor=${encodeURIComponent(firstPage.next_cursor)}`, { headers: { cookie: 'itc_expense_warrior_access=admin-session' } })
+  assert.equal(nextPageResponse.status, 200)
+  const nextPage = (await nextPageResponse.json()).data
+  assert.deepEqual(nextPage.snapshots, rows.slice(25))
+  assert.equal(nextPage.has_more, false)
+  assert.equal(nextPage.next_cursor, null)
+  assert.deepEqual(received[1].cursor, { retrievedAt: rows[24].retrieved_at, snapshotBatchId: rows[24].snapshot_batch_id })
+  const invalidCursor = await fetch(`${url}/wallet/provider-balance/history?cursor=not-a-cursor`, { headers: { cookie: 'itc_expense_warrior_access=admin-session' } })
+  assert.equal(invalidCursor.status, 400)
+  assert.equal(received.length, 2)
 })
 
 test('ITC ledger balance route requires admin and returns the authoritative ledger fields without caching', async (t) => {
@@ -77,11 +94,11 @@ test('ITC ledger balance route requires admin and returns the authoritative ledg
   const { server, url } = await listen(app)
   t.after(() => server.close())
 
-  const forbidden = await fetch(`${url}/wallet/ledger-balance`, { headers: { cookie: 'itc_backoffice_access=staff-session' } })
+  const forbidden = await fetch(`${url}/wallet/ledger-balance`, { headers: { cookie: 'itc_expense_warrior_access=staff-session' } })
   assert.equal(forbidden.status, 403)
   assert.equal(calls, 0)
 
-  const response = await fetch(`${url}/wallet/ledger-balance`, { headers: { cookie: 'itc_backoffice_access=admin-session' } })
+  const response = await fetch(`${url}/wallet/ledger-balance`, { headers: { cookie: 'itc_expense_warrior_access=admin-session' } })
   assert.equal(response.status, 200)
   assert.equal(response.headers.get('cache-control'), 'private, no-store')
   assert.deepEqual((await response.json()).data, { source: 'itc_ledger', currency: 'ZMW', posted_balance: '1000.25', active_holds: '125.75', available_balance: '874.50', as_of: '2026-10-15T12:00:00.000Z' })
@@ -99,9 +116,9 @@ test('ITC ledger history is admin-only, bounded, filtered, and never browser cac
   const { server, url } = await listen(app)
   t.after(() => server.close())
 
-  const forbidden = await fetch(`${url}/wallet/ledger-history`, { headers: { cookie: 'itc_backoffice_access=staff-session' } })
+  const forbidden = await fetch(`${url}/wallet/ledger-history`, { headers: { cookie: 'itc_expense_warrior_access=staff-session' } })
   assert.equal(forbidden.status, 403)
-  const response = await fetch(`${url}/wallet/ledger-history?date_from=2026-10-15T00%3A00%3A00.000Z&limit=25`, { headers: { cookie: 'itc_backoffice_access=admin-session' } })
+  const response = await fetch(`${url}/wallet/ledger-history?date_from=2026-10-15T00%3A00%3A00.000Z&limit=25`, { headers: { cookie: 'itc_expense_warrior_access=admin-session' } })
   assert.equal(response.status, 200)
   assert.equal(response.headers.get('cache-control'), 'private, no-store')
   assert.deepEqual(received[0], { dateFrom: '2026-10-15T00:00:00.000Z', dateTo: null, limit: 25, cursor: null })

@@ -6,6 +6,8 @@ const { MIGRATION_POSTCONDITIONS, verifyMigrationPostconditions } = require('./m
 
 const MIGRATION_CONFIRMATION = 'APPLY'
 const ADVISORY_LOCK_ID = 455752
+const RUNTIME_ROLE_PERMISSIONS_MIGRATION = '0018_runtime_role_permissions.sql'
+const RUNTIME_ROLE_PERMISSIONS_CHECKSUM = 'e7bc9a7010d997d03e4542f883f65e8668838c23e041dd516f396ac36cc83fe0'
 const MIGRATION_CONFIG_DETAIL_KEYS = new Set([
   'DB_MIGRATION_TARGET',
   'DB_MIGRATION_ALLOWED_TARGETS',
@@ -375,7 +377,17 @@ async function verifyMigrations({ pool, target, directory } = {}) {
   }
 }
 
-async function runMigrations({ pool, target, env = process.env, directory } = {}) {
+function canRecoverPartialRuntimePermissions(status, migrations) {
+  if (status?.blockers?.length !== 1 || status.blockers[0] !== 'PARTIAL_MIGRATION_SCHEMA') return false
+  if (status.pending?.length !== 1 || status.pending[0].name !== RUNTIME_ROLE_PERMISSIONS_MIGRATION) return false
+  const migration = migrations.find(({ name }) => name === RUNTIME_ROLE_PERMISSIONS_MIGRATION)
+  if (!migration || migration.checksum !== RUNTIME_ROLE_PERMISSIONS_CHECKSUM) return false
+  const postcondition = status.postconditions?.find(({ migration: name }) => name === RUNTIME_ROLE_PERMISSIONS_MIGRATION)
+  return Boolean(postcondition && !postcondition.passed && postcondition.failedChecks?.length > 0 &&
+    postcondition.failedChecks.every((name) => /^(?:privilege|column-privilege|database-privilege|schema-privilege):/.test(name)))
+}
+
+async function runMigrations({ pool, target, env = process.env, directory, verifyPostconditions = verifyMigrationPostconditions } = {}) {
   assertMigrationAllowed(env)
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('A PostgreSQL pool is required')
   if (!target) {
@@ -398,7 +410,8 @@ async function runMigrations({ pool, target, env = process.env, directory } = {}
     if (lock.rows?.[0]?.acquired !== true) throw migrationError('MIGRATION_LOCK_UNAVAILABLE', 'Another migration process holds the migration lock')
     locked = true
     const status = await inspectMigrationClient(client, target, migrations)
-    if (status.state === 'MANUAL_REVIEW_REQUIRED' || status.state === 'BLOCKED') {
+    const recoverPartialRuntimePermissions = canRecoverPartialRuntimePermissions(status, migrations)
+    if (status.state === 'MANUAL_REVIEW_REQUIRED' || (status.state === 'BLOCKED' && !recoverPartialRuntimePermissions)) {
       throw migrationError(status.blockers[0] || 'MIGRATION_PREFLIGHT_BLOCKED', 'Migration preflight is blocked; inspect status before applying')
     }
     let bootstrapLedger = status.state === 'NEW_EMPTY_DATABASE'
@@ -424,6 +437,13 @@ async function runMigrations({ pool, target, env = process.env, directory } = {}
           'INSERT INTO expense_warrior_schema_migrations (migration_name, checksum) VALUES ($1, $2)',
           [migration.name, migration.checksum]
         )
+        if (recoverPartialRuntimePermissions && migration.name === RUNTIME_ROLE_PERMISSIONS_MIGRATION) {
+          const postconditions = await verifyPostconditions(client, [migration])
+          const result = postconditions.verified?.find(({ migration: name }) => name === migration.name)
+          if (postconditions.blockers?.length || !result?.passed) {
+            throw migrationError('MIGRATION_POSTCONDITION_FAILED', 'Recovered runtime permissions did not satisfy migration postconditions')
+          }
+        }
         await client.query('COMMIT')
         applied.push(migration.name)
         if (bootstrapLedger) bootstrapLedger = false
@@ -484,4 +504,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations }
+module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, canRecoverPartialRuntimePermissions, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations }

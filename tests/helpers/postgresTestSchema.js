@@ -41,6 +41,22 @@ async function createTemporaryTables(client, tableNames) {
   for (const table of tableNames) {
     if (!TABLE_NAME.test(table)) throw new Error(`Invalid temporary test table name: ${table}`)
 
+    // Migration 0018 intentionally denies the runtime role SELECT on audit_events.
+    // Define its session-local fixture directly so tests do not need to weaken that ACL.
+    if (table === 'audit_events') {
+      await client.query(`CREATE TEMP TABLE pg_temp.audit_events (
+        audit_event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        actor_customer_id uuid NOT NULL,
+        action text NOT NULL CHECK (length(action) BETWEEN 1 AND 100),
+        target_type text NOT NULL CHECK (length(target_type) BETWEEN 1 AND 60),
+        target_id uuid,
+        request_id text,
+        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT now()
+      ) ON COMMIT PRESERVE ROWS`)
+      continue
+    }
+
     if (table === 'payment_link_receivable_closures') {
       await client.query(`CREATE TEMP TABLE pg_temp.${table} (
         payment_link_id uuid PRIMARY KEY, receivable_id uuid NOT NULL,
