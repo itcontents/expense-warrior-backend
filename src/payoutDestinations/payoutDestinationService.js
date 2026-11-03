@@ -49,7 +49,7 @@ function createPayoutDestinationService({ repository, phoneVault, providerRegist
       return repository.listCurrent()
     },
     async listNetworks(actor) {
-      assertActor(actor, true)
+      assertActor(actor)
       if (providerRegistry && typeof providerRegistry.getNetworks === 'function') {
         try { return providerRegistry.getNetworks(undefined, 'payout') }
         catch { throw new PayoutDestinationError('PAYOUT_PROVIDER_CAPABILITY_UNAVAILABLE', 503) }

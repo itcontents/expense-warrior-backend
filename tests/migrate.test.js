@@ -5,7 +5,7 @@ const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 
-const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, canRecoverPartialRuntimePermissions, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations } = require('../src/db/migrate')
+const { collectMigrations, assertMigrationAllowed, getMigrationDatabaseConfig, assertMigrationTargetIdentity, canRecoverPartialRuntimePermissions, canApplyLegacyRequestDestinationMigration, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations } = require('../src/db/migrate')
 
 const migrationTarget = { name: 'local', host: '127.0.0.1', port: 5432, database: 'expense_warrior', user: 'expense_warrior_migrator', schema: 'public', searchPath: 'public, pg_temp' }
 
@@ -157,6 +157,36 @@ test('partial migration recovery is limited to exact 0018 with permission-only p
   assert.equal(canRecoverPartialRuntimePermissions({ ...status, postconditions: [{ ...status.postconditions[0], failedChecks: ['relation:payment_link_creation_requests'] }] }, [migration]), false)
   assert.equal(canRecoverPartialRuntimePermissions(status, [{ ...migration, checksum: '0'.repeat(64) }]), false)
   assert.equal(canRecoverPartialRuntimePermissions({ ...status, pending: [{ name: '0002_expense_requests.sql' }] }, [migration]), false)
+})
+
+test('request destination migration accepts only the exact verified 0014 baseline as a pending 0019 state', () => {
+  const migrations = [
+    { name: '0018_runtime_role_permissions.sql', checksum: 'e7bc9a7010d997d03e4542f883f65e8668838c23e041dd516f396ac36cc83fe0' },
+    { name: '0019_request_specific_payout_destinations.sql', checksum: 'd42ab92f5b2d07a7173125ecab938dcdb489f7d45292efb5a7d54cb3170ba13e' },
+  ]
+  const legacyConstraints = [
+    { name: 'expense_requests_payout_snapshot_chk', present: true, validated: true, definition: "CHECK (payout_destination_id IS NULL AND payout_network_code IS NULL AND payout_phone_ciphertext IS NULL AND payout_encryption_key_id IS NULL AND payout_phone_last4 IS NULL OR payout_destination_id IS NOT NULL AND payout_network_code ~ '^[A-Z0-9_]{1,40}$'::text AND payout_phone_ciphertext IS NOT NULL AND payout_encryption_key_id IS NOT NULL AND payout_phone_last4 ~ '^[0-9]{4}$'::text)" },
+    { name: 'expense_requests_payout_provider_snapshot_chk', present: true, validated: true, definition: "CHECK (payout_destination_id IS NULL AND payout_provider_code IS NULL OR payout_destination_id IS NOT NULL AND payout_provider_code::text ~ '^[a-z][a-z0-9_]{1,31}$'::text)" },
+    { name: 'expense_requests_payout_provider_account_pair_check', present: true, validated: true, definition: 'CHECK (payout_provider_account_id IS NULL AND payout_provider_account_version IS NULL OR payout_destination_id IS NOT NULL AND payout_provider_account_id IS NOT NULL AND payout_provider_account_version > 0)' },
+  ]
+  const status = {
+    state: 'BLOCKED',
+    blockers: ['PARTIAL_MIGRATION_SCHEMA'],
+    applied: [{ name: migrations[0].name, checksum: migrations[0].checksum, matchesSource: true }],
+    pending: [{ name: migrations[1].name, checksum: migrations[1].checksum }],
+    postconditions: [
+      { migration: migrations[0].name, passed: true },
+      { migration: migrations[1].name, passed: false, failedChecks: [
+        'constraint:expense_requests_payout_snapshot_chk',
+        'constraint:expense_requests_payout_provider_snapshot_chk',
+        'constraint:expense_requests_payout_provider_account_pair_check',
+      ], constraintDetails: legacyConstraints },
+    ],
+  }
+  assert.equal(canApplyLegacyRequestDestinationMigration(status, migrations), true)
+  assert.equal(canApplyLegacyRequestDestinationMigration({ ...status, postconditions: status.postconditions.map((entry) => entry.migration === migrations[1].name ? { ...entry, constraintDetails: legacyConstraints.slice(1) } : entry) }, migrations), false)
+  assert.equal(canApplyLegacyRequestDestinationMigration({ ...status, applied: [{ ...status.applied[0], matchesSource: false }] }, migrations), false)
+  assert.equal(canApplyLegacyRequestDestinationMigration({ ...status, blockers: ['MIGRATION_CHECKSUM_MISMATCH', 'PARTIAL_MIGRATION_SCHEMA'] }, migrations), false)
 })
 
 test('getMigrationDatabaseConfig fails closed without a separate migration identity', () => {

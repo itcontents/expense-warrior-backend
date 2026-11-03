@@ -19,7 +19,7 @@ test('identityClient_forwardsOnlyBackofficeCookieAndDoesNotReturnToken', async (
         success: true,
         data: {
           token: 'must-not-be-retained',
-          customer: { customer_id: 'c8da2d30-9805-4f51-9f6c-5bca3ff77a01', role: 'customer', expense_warrior_role: 'staff', is_active: true },
+          customer: { customer_id: 'c8da2d30-9805-4f51-9f6c-5bca3ff77a01', role: 'customer', expense_warrior_role: 'admin', is_master_admin: true, is_active: true },
         },
       })
     },
@@ -32,7 +32,7 @@ test('identityClient_forwardsOnlyBackofficeCookieAndDoesNotReturnToken', async (
   assert.equal(captured.options.headers['X-Session-Audience'], 'expense_warrior')
   assert.equal(captured.options.headers['X-Session-Response'], 'cookie-only')
   assert.equal(captured.options.headers['X-Request-Id'], 'request-123')
-  assert.deepEqual(actor, { customerId: 'c8da2d30-9805-4f51-9f6c-5bca3ff77a01', role: 'staff', active: true })
+  assert.deepEqual(actor, { customerId: 'c8da2d30-9805-4f51-9f6c-5bca3ff77a01', role: 'admin', isMasterAdmin: true, active: true })
   assert.equal(Object.hasOwn(actor, 'token'), false)
 })
 

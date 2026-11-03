@@ -388,7 +388,7 @@ test('retry forwards admin identity and propagates locked eligibility and self-r
   for (const code of ['SELF_REVIEW_PROHIBITED', 'PAYOUT_RETRY_NOT_ALLOWED']) {
     const h = retryHarness()
     h.repository.preparePayoutRetry = async (input) => {
-      assert.deepEqual(input, { actor: { customerId: actor.customerId, role: 'admin' }, requestId, requestIdForAudit: 'audit' })
+      assert.deepEqual(input, { actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: false }, requestId, requestIdForAudit: 'audit' })
       throw Object.assign(new Error(code), { code, statusCode: 409 })
     }
     await assert.rejects(h.service.retry(actor, requestId, 'audit'), { code })

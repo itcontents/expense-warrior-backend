@@ -9,7 +9,8 @@ const readMigration = () => fs.readFileSync(migrationPath, 'utf8')
 
 test('A/R recovery migration follows existing payment-link migrations', async () => {
   const names = (await collectMigrations()).map(({ name }) => name)
-  assert.equal(names.at(-2), '0017_payment_link_receivable_recovery.sql')
+  assert.ok(names.indexOf('0017_payment_link_receivable_recovery.sql') < names.indexOf('0018_runtime_role_permissions.sql'))
+  assert.equal(names.at(-1), '0019_request_specific_payout_destinations.sql')
 })
 
 test('A/R recovery migration stores durable reservation state and idempotent settled-link closure', () => {

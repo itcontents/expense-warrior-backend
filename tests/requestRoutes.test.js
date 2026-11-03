@@ -107,6 +107,20 @@ test('requestRoutes_rejectsMalformedRequestBeforeDatabaseWrite', async () => {
   })
 })
 
+test('requestRoutes_rejectsPartialRequestSpecificPayoutDestination', async () => {
+  const { app, getDatabaseWrites } = appFor()
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/v1/expense-warrior/requests`, {
+      method: 'POST',
+      headers: { Cookie: 'itc_expense_warrior_access=valid', Origin: 'http://localhost:5175', 'Content-Type': 'application/json', 'Idempotency-Key': 'e1c5dc16-081f-4e89-98bd-a14a6f37fc2d' },
+      body: JSON.stringify({ category_id: '45a79d36-1c70-4622-84d2-145a26f288d3', amount: '25.00', payout_phone_number: '260975123456' }),
+    })
+    assert.equal(response.status, 400)
+    assert.equal((await response.json()).error.code, 'INVALID_REQUEST')
+    assert.equal(getDatabaseWrites(), 0)
+  })
+})
+
 test('requestRoutes_rejectsUnallowlistedSortBeforeDatabaseQuery', async () => {
   const { app } = appFor()
   await withServer(app, async (baseUrl) => {

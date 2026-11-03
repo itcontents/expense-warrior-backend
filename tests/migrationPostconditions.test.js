@@ -146,6 +146,9 @@ test('postcondition verification uses catalog SELECTs and returns one result per
   assert.ok(statements.every((statement) => /^SELECT\b/i.test(statement)))
   assert.ok(statements.some((statement) => /pg_catalog\.pg_index/.test(statement)))
   assert.ok(statements.some((statement) => /pg_catalog\.pg_constraint/.test(statement)))
+  const requestDestination = result.verified.find(({ migration }) => migration === '0019_request_specific_payout_destinations.sql')
+  assert.equal(requestDestination.constraintDetails.length, 3)
+  assert.ok(requestDestination.constraintDetails.every(({ present, validated, definition }) => present && validated && definition))
   assert.ok(statements.some((statement) => /has_table_privilege/.test(statement)))
 })
 

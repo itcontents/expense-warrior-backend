@@ -146,6 +146,32 @@ test('submitRequest_routesAdminRequestsToPeerAdminWithTheirPayoutDestination', a
   assert.equal(insertValues[6], 'pawapay')
 })
 
+test('submitRequest_snapshotsAnAlternateNumberWithoutReadingOrChangingSavedDestinations', async () => {
+  const admin = { ...actor, role: 'admin' }
+  let insertValues
+  const { calls, pool } = fakePool((sql, values) => {
+    if (sql.includes('INSERT INTO idempotency_records')) return { rowCount: 1, rows: [{ idempotency_key: key }] }
+    if (sql.includes('FROM expense_categories')) return { rowCount: 1, rows: [{ category_id: request.categoryId, parent_category_id: null, reason_required: false, attachment_required: false }] }
+    if (sql.includes('INSERT INTO expense_requests')) {
+      insertValues = values
+      return { rowCount: 1, rows: [{ request_id: '6a168a4e-65ca-4887-9a9c-6137a8002aba', status: 'PENDING_ADMIN' }] }
+    }
+    return { rowCount: 1, rows: [] }
+  })
+  const repository = createRequestRepository({ pool })
+  const result = await repository.submit({ actor: admin, request: {
+    ...request,
+    payoutDestination: {
+      providerCode: 'pawapay', networkCode: 'AIRTEL_OAPI_ZMB',
+      phoneCiphertext: 'encrypted-request-only', encryptionKeyId: 'key-v1',
+      phoneFingerprint: 'opaque-keyed-fingerprint', phoneLast4: '3456',
+    },
+  }, idempotencyKey: key })
+  assert.equal(result.request.status, 'PENDING_ADMIN')
+  assert.equal(calls.some((call) => call.sql.includes('FROM staff_payout_destinations')), false)
+  assert.deepEqual(insertValues.slice(5, 11), [null, 'pawapay', 'AIRTEL_OAPI_ZMB', 'encrypted-request-only', 'key-v1', '3456'])
+})
+
 test('submitRequest_requiresAdminPayoutDestinationBeforeCreatingRequest', async () => {
   const { pool } = fakePool((sql) => {
     if (sql.includes('INSERT INTO idempotency_records')) return { rowCount: 1, rows: [{ idempotency_key: key }] }
@@ -291,8 +317,17 @@ test('listApprovals_usesManagerScopeOrAdminQueueAndExcludesSelfApproval', async 
   assert.match(call.sql, /r\.reviewer_manager_customer_id\s*=\s*\$2/)
   assert.match(call.sql, /r\.status IN \('PENDING_MANAGER', 'MANAGER_APPROVAL_PENDING_HOLD'\)/)
   assert.match(call.sql, /r\.status IN \('PENDING_ADMIN', 'MANAGER_APPROVED'\)/)
-  assert.match(call.sql, /r\.requester_customer_id <> \$2/)
-  assert.deepEqual(call.values, ['staff', actor.customerId, 51, 0])
+  assert.match(call.sql, /r\.requester_customer_id <> \$2 OR \(\$5::boolean AND \$1::text = 'admin'\)/)
+  assert.deepEqual(call.values, ['staff', actor.customerId, 51, 0, false])
+})
+
+test('listApprovals_includesOwnRequestsOnlyForVerifiedMasterAdmin', async () => {
+  let call
+  const pool = { connect: async () => assert.fail('approval queue must be read-only'), query: async (sql, values) => { call = { sql, values }; return { rows: [] } } }
+  const repository = createRequestRepository({ pool })
+  await repository.listApprovals({ actor: { ...actor, role: 'admin', isMasterAdmin: true }, filters: { limit: 50, offset: 0, sort: 'created_at', direction: 'desc' } })
+
+  assert.deepEqual(call.values, ['admin', actor.customerId, 51, 0, true])
 })
 
 test('reject_appendsDecisionUpdatesRequestAndAuditsWithinOneTransaction', async () => {

@@ -17,7 +17,7 @@ function actorRole(actor) {
 }
 
 function repositoryActor(actor) {
-  return { customerId: actor.customerId, role: actorRole(actor) }
+  return { customerId: actor.customerId, role: actorRole(actor), isMasterAdmin: actor.isMasterAdmin === true }
 }
 
 function assertStaffActor(actor) {
@@ -45,7 +45,7 @@ function validateSubmission(input, idempotencyKey) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new RequestServiceError('INVALID_REQUEST', 400)
   }
-  if (Object.keys(input).some((key) => !['category_id', 'subcategory_id', 'amount', 'reason'].includes(key))) {
+  if (Object.keys(input).some((key) => !['category_id', 'subcategory_id', 'amount', 'reason', 'payout_provider_code', 'payout_network_code', 'payout_phone_number'].includes(key))) {
     throw new RequestServiceError('INVALID_REQUEST', 400)
   }
   if (!UUID_PATTERN.test(String(input.category_id || ''))) {
@@ -63,16 +63,27 @@ function validateSubmission(input, idempotencyKey) {
   if (typeof reason !== 'string' || reason.length > 2000) {
     throw new RequestServiceError('INVALID_REQUEST', 400)
   }
+  const hasPayoutOverride = input.payout_provider_code !== undefined || input.payout_network_code !== undefined || input.payout_phone_number !== undefined
+  if (hasPayoutOverride && (!/^[a-z][a-z0-9_]{1,31}$/.test(String(input.payout_provider_code || '')) ||
+      !/^[A-Z][A-Z0-9_]{1,39}$/.test(String(input.payout_network_code || '')) ||
+      typeof input.payout_phone_number !== 'string' || input.payout_phone_number.trim().length < 9 || input.payout_phone_number.trim().length > 20)) {
+    throw new RequestServiceError('INVALID_PAYOUT_DESTINATION', 400)
+  }
   return {
     categoryId: input.category_id,
     subcategoryId: input.subcategory_id || null,
     amount: `${whole}.${fraction.padEnd(2, '0')}`,
     currency: 'ZMW',
     reason: reason.trim() || null,
+    ...(hasPayoutOverride ? { payoutDestinationInput: {
+      providerCode: input.payout_provider_code,
+      networkCode: input.payout_network_code,
+      phoneNumber: input.payout_phone_number.trim(),
+    } } : {}),
   }
 }
 
-function createRequestService({ repository, attachmentStorage, financeClient, phoneVault } = {}) {
+function createRequestService({ repository, attachmentStorage, financeClient, phoneVault, providerRegistry = null } = {}) {
   if (!repository || typeof repository.submit !== 'function' || typeof repository.listForActor !== 'function' || typeof repository.listApprovals !== 'function') {
     throw new TypeError('A request repository is required')
   }
@@ -81,6 +92,29 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
     async submitRequest(actor, input, idempotencyKey, { file, requestId } = {}) {
       assertStaffActor(actor)
       const request = validateSubmission(input, idempotencyKey)
+      if (request.payoutDestinationInput) {
+        if (!phoneVault || typeof phoneVault.encrypt !== 'function' || typeof phoneVault.fingerprint !== 'function' ||
+            !providerRegistry || typeof providerRegistry.getNetworks !== 'function') {
+          throw new RequestServiceError('PAYOUT_DESTINATION_UNAVAILABLE', 503)
+        }
+        const { providerCode, networkCode, phoneNumber } = request.payoutDestinationInput
+        let supported = false
+        try { supported = providerRegistry.getNetworks(providerCode, 'payout').some((network) => network.code === networkCode) } catch {}
+        if (!supported) throw new RequestServiceError('INVALID_PAYOUT_DESTINATION', 422)
+        let normalizedPhone
+        try { normalizedPhone = require('../payoutDestinations/phoneVault').normalizeZambiaPhone(phoneNumber) }
+        catch { throw new RequestServiceError('INVALID_PAYOUT_PHONE', 422) }
+        const encrypted = phoneVault.encrypt({ staffId: actor.customerId, phone: normalizedPhone })
+        request.payoutDestination = {
+          providerCode,
+          networkCode,
+          phoneCiphertext: encrypted.ciphertext,
+          encryptionKeyId: encrypted.keyId,
+          phoneFingerprint: phoneVault.fingerprint({ staffId: actor.customerId, phone: normalizedPhone }),
+          phoneLast4: normalizedPhone.slice(-4),
+        }
+        delete request.payoutDestinationInput
+      }
       let attachment = null
       if (file) {
         if (!attachmentStorage || typeof attachmentStorage.save !== 'function' || typeof attachmentStorage.remove !== 'function') {

@@ -160,7 +160,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
 
   async function releaseFailedPayout(actor, request, payout, reasonCode, requestIdForAudit) {
     const prepared = await repository.prepareRelease({
-      actor: { customerId: actor.customerId, role: 'admin' },
+      actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true },
       requestId: request.request_id,
       payoutId: payout.payout_id,
       reasonCode,
@@ -190,7 +190,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
         throw new StaffPayoutServiceError('ITC_FINANCE_RESPONSE_INVALID', 502)
       }
       const completed = await repository.completeRelease({
-        actor: { customerId: actor.customerId, role: 'admin' }, requestId: request.request_id,
+        actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true }, requestId: request.request_id,
         payoutId: payout.payout_id, operationId: operation.operationId, financeOperation,
         requestIdForAudit,
       })
@@ -300,7 +300,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
       return { request: { request_id: request.request_id, status: 'PAYOUT_PENDING' }, pending: true, errorCode: 'ITC_FINANCE_RESPONSE_INVALID' }
     }
     const completed = await repository.completePayout({
-      actor: { customerId: actor.customerId, role: 'admin' }, requestId: request.request_id,
+      actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true }, requestId: request.request_id,
       payoutId: payout.payout_id, providerTransactionId: response.evidence.provider_transaction_id,
       providerStatus, providerReference: response.evidence.provider_transaction_id,
       financeOperation, verifiedAt, requestIdForAudit,
@@ -313,7 +313,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
     if (!UUID.test(String(requestId || ''))) throw new StaffPayoutServiceError('INVALID_REQUEST', 400)
     const routeSnapshot = await payoutRouteSnapshot(requestId)
     const prepare = () => repository.prepareFinalApproval({
-      actor: { customerId: actor.customerId, role: 'admin' }, requestId, requestIdForAudit, ...routeSnapshot,
+      actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true }, requestId, requestIdForAudit, ...routeSnapshot,
     })
     let prepared = await prepare()
     if (prepared.replayed && prepared.request?.status === 'PAID') return { request: prepared.request, pending: false, replayed: true }
@@ -337,7 +337,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
           }
           reservation = { ...reservation, expenseAccountCode: mapping.account_code }
           await repository.setAdminReservationAccountingSnapshot({
-            actor: { customerId: actor.customerId, role: 'admin' }, requestId, reservation,
+            actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true }, requestId, reservation,
             expenseAccountCode: mapping.account_code, requestIdForAudit,
           })
         }
@@ -367,7 +367,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
           throw new StaffPayoutServiceError('ITC_FINANCE_RESPONSE_INVALID', 502)
         }
         await repository.completeAdminReservation({
-          actor: { customerId: actor.customerId, role: 'admin' }, requestId,
+          actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true }, requestId,
           reservation, financeOperation, requestIdForAudit,
         })
         prepared = await prepare()
@@ -380,7 +380,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
         ]).has(code)
         try {
           await repository.markAdminReservationFailure({
-            actor: { customerId: actor.customerId, role: 'admin' }, requestId,
+            actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true }, requestId,
             operationId: reservation.operationId, state: definitiveFailure ? 'FAILED' : 'UNKNOWN',
             errorCode: code, requestIdForAudit,
           })
@@ -444,7 +444,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
   async function retry(actor, requestId, requestIdForAudit = null) {
     assertAdmin(actor)
     if (!UUID.test(String(requestId || ''))) throw new StaffPayoutServiceError('INVALID_REQUEST', 400)
-    const admin = { customerId: actor.customerId, role: 'admin' }
+    const admin = { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true }
     const prepared = await repository.preparePayoutRetry({ actor: admin, requestId, requestIdForAudit })
     const { request, payout, reservation, reservationActorCustomerId } = prepared
     if (!UUID.test(String(reservationActorCustomerId || '')) || !request || !payout || !prepared.requiresReservation || payout.state !== 'RESERVING' ||
@@ -517,7 +517,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
   async function reconcile(actor, requestId, requestIdForAudit = null) {
     assertAdmin(actor)
     if (!UUID.test(String(requestId || ''))) throw new StaffPayoutServiceError('INVALID_REQUEST', 400)
-    const prepared = await repository.preparePayoutReconciliation({ actor: { customerId: actor.customerId, role: 'admin' }, requestId, requestIdForAudit })
+    const prepared = await repository.preparePayoutReconciliation({ actor: { customerId: actor.customerId, role: 'admin', isMasterAdmin: actor.isMasterAdmin === true }, requestId, requestIdForAudit })
     if (prepared.request?.status === 'PAID') return { request: prepared.request, pending: false, replayed: true }
     if (!prepared.request || !prepared.payout) throw new StaffPayoutServiceError('PAYOUT_NOT_FOUND', 404)
     return reconcilePrepared(actor, prepared.request, prepared.payout, requestIdForAudit)

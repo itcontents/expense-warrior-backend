@@ -8,6 +8,15 @@ const MIGRATION_CONFIRMATION = 'APPLY'
 const ADVISORY_LOCK_ID = 455752
 const RUNTIME_ROLE_PERMISSIONS_MIGRATION = '0018_runtime_role_permissions.sql'
 const RUNTIME_ROLE_PERMISSIONS_CHECKSUM = 'e7bc9a7010d997d03e4542f883f65e8668838c23e041dd516f396ac36cc83fe0'
+const REQUEST_DESTINATION_MIGRATION = '0019_request_specific_payout_destinations.sql'
+const REQUEST_DESTINATION_CHECKSUM = 'd42ab92f5b2d07a7173125ecab938dcdb489f7d45292efb5a7d54cb3170ba13e'
+const REQUEST_DESTINATION_LEGACY_CONSTRAINTS = Object.freeze({
+  expense_requests_payout_snapshot_chk: "check (payout_destination_id is null and payout_network_code is null and payout_phone_ciphertext is null and payout_encryption_key_id is null and payout_phone_last4 is null or payout_destination_id is not null and payout_network_code ~ '^[a-z0-9_]{1,40}$' and payout_phone_ciphertext is not null and payout_encryption_key_id is not null and payout_phone_last4 ~ '^[0-9]{4}$')",
+  expense_requests_payout_provider_snapshot_chk: "check (payout_destination_id is null and payout_provider_code is null or payout_destination_id is not null and payout_provider_code ~ '^[a-z][a-z0-9_]{1,31}$')",
+  expense_requests_payout_provider_account_pair_check: 'check (payout_provider_account_id is null and payout_provider_account_version is null or payout_destination_id is not null and payout_provider_account_id is not null and payout_provider_account_version > 0)',
+})
+const REQUEST_DESTINATION_LEGACY_FAILURES = Object.freeze(Object.keys(REQUEST_DESTINATION_LEGACY_CONSTRAINTS)
+  .map((name) => `constraint:${name}`).sort())
 const MIGRATION_CONFIG_DETAIL_KEYS = new Set([
   'DB_MIGRATION_TARGET',
   'DB_MIGRATION_ALLOWED_TARGETS',
@@ -303,12 +312,25 @@ async function inspectMigrationClient(client, target, migrations) {
         for (const migration of applied) {
           if (!checkByName.get(migration.name)?.passed) blockers.push('POSTCONDITION_FAILED')
         }
+        const legacyCandidate = pending.length === 1 ? checkByName.get(pending[0].name) : null
+        const legacyBlockers = [...blockers]
+        if (legacyCandidate && !legacyCandidate.passed && legacyCandidate.presentCount > 0) legacyBlockers.push('PARTIAL_MIGRATION_SCHEMA')
+        const recognizedLegacyRequestDestination = canApplyLegacyRequestDestinationMigration({
+          state: legacyBlockers.length ? 'BLOCKED' : 'READY',
+          blockers: legacyBlockers,
+          applied,
+          pending,
+          postconditions: schemaChecks.verified,
+        }, migrations)
         for (const migration of pending) {
           const check = checkByName.get(migration.name)
           if (!check || check.presentCount === 0) continue
+          if (recognizedLegacyRequestDestination && migration.name === REQUEST_DESTINATION_MIGRATION) continue
           blockers.push(check.passed ? 'MIGRATION_SCHEMA_AHEAD_OF_LEDGER' : 'PARTIAL_MIGRATION_SCHEMA')
         }
-        postconditionResults = schemaChecks.verified
+        postconditionResults = schemaChecks.verified.map((check) => recognizedLegacyRequestDestination && check.migration === REQUEST_DESTINATION_MIGRATION
+          ? { ...check, recognizedLegacyBaseSchema: true }
+          : check)
       }
     }
 
@@ -387,6 +409,34 @@ function canRecoverPartialRuntimePermissions(status, migrations) {
     postcondition.failedChecks.every((name) => /^(?:privilege|column-privilege|database-privilege|schema-privilege):/.test(name)))
 }
 
+function normalizeConstraintDefinition(definition) {
+  return String(definition || '').toLowerCase().replace(/\s*::\s*text\b/g, '').replace(/\s+/g, ' ').trim()
+}
+
+function canApplyLegacyRequestDestinationMigration(status, migrations) {
+  if (status?.blockers?.length !== 1 || status.blockers[0] !== 'PARTIAL_MIGRATION_SCHEMA') return false
+  if (status.pending?.length !== 1 || status.pending[0].name !== REQUEST_DESTINATION_MIGRATION ||
+      status.pending[0].checksum !== REQUEST_DESTINATION_CHECKSUM) return false
+  if (migrations.at(-1)?.name !== REQUEST_DESTINATION_MIGRATION ||
+      migrations.at(-1)?.checksum !== REQUEST_DESTINATION_CHECKSUM ||
+      status.applied?.length !== migrations.length - 1) return false
+  for (let index = 0; index < migrations.length - 1; index += 1) {
+    const migration = migrations[index]
+    const applied = status.applied[index]
+    if (!applied || applied.name !== migration.name || applied.matchesSource !== true || applied.checksum !== migration.checksum) return false
+  }
+  const failed = status.postconditions?.find(({ migration }) => migration === REQUEST_DESTINATION_MIGRATION)
+  if (!failed || failed.passed || JSON.stringify([...(failed.failedChecks || [])].sort()) !== JSON.stringify(REQUEST_DESTINATION_LEGACY_FAILURES)) return false
+  const details = new Map((failed.constraintDetails || []).map((detail) => [detail.name, detail]))
+  return Object.entries(REQUEST_DESTINATION_LEGACY_CONSTRAINTS).every(([name, expected]) => {
+    const actual = details.get(name)
+    return actual?.present === true && actual.validated === true &&
+      normalizeConstraintDefinition(actual.definition) === normalizeConstraintDefinition(expected)
+  }) && status.postconditions
+    .filter(({ migration }) => migration !== REQUEST_DESTINATION_MIGRATION)
+    .every(({ passed }) => passed === true)
+}
+
 async function runMigrations({ pool, target, env = process.env, directory, verifyPostconditions = verifyMigrationPostconditions } = {}) {
   assertMigrationAllowed(env)
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('A PostgreSQL pool is required')
@@ -437,7 +487,8 @@ async function runMigrations({ pool, target, env = process.env, directory, verif
           'INSERT INTO expense_warrior_schema_migrations (migration_name, checksum) VALUES ($1, $2)',
           [migration.name, migration.checksum]
         )
-        if (recoverPartialRuntimePermissions && migration.name === RUNTIME_ROLE_PERMISSIONS_MIGRATION) {
+        if ((recoverPartialRuntimePermissions && migration.name === RUNTIME_ROLE_PERMISSIONS_MIGRATION) ||
+            migration.name === REQUEST_DESTINATION_MIGRATION) {
           const postconditions = await verifyPostconditions(client, [migration])
           const result = postconditions.verified?.find(({ migration: name }) => name === migration.name)
           if (postconditions.blockers?.length || !result?.passed) {
@@ -504,4 +555,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, canRecoverPartialRuntimePermissions, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations }
+module.exports = { assertMigrationAllowed, assertMigrationTargetIdentity, canApplyLegacyRequestDestinationMigration, canRecoverPartialRuntimePermissions, collectMigrations, getMigrationDatabaseConfig, inspectMigrations, planMigrations, runMigrations, serializeMigrationFailure, verifyMigrations }

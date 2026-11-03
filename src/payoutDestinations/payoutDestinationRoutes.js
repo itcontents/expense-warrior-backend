@@ -30,6 +30,9 @@ function createPayoutDestinationRouter({ identityClient, destinationService }) {
   router.get('/admin/payout-destinations/networks', requireSession, requireAdmin, async (_req, res) => {
     try { return res.status(200).json({ data: { items: await destinationService.listNetworks(_req.actor) } }) } catch (error) { return respondError(res, error) }
   })
+  router.get('/payout-destination/networks', requireSession, async (req, res) => {
+    try { return res.status(200).json({ data: { items: await destinationService.listNetworks(req.actor) } }) } catch (error) { return respondError(res, error) }
+  })
   router.put('/admin/payout-destinations/:staff_customer_id', requireSession, requireAdmin, async (req, res) => {
     const { value, error } = assignmentSchema.validate(req.body, { abortEarly: false, convert: true })
     const staffIdValidation = Joi.string().guid().validate(req.params.staff_customer_id)

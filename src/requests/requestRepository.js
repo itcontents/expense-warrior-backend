@@ -1,6 +1,7 @@
 const { createHash, randomUUID } = require('node:crypto')
 
 const OPERATION_SUBMIT = 'request.submit.v1'
+const canMasterAdminSelfReview = (actor) => String(actor?.role || '').toLowerCase() === 'admin' && actor?.isMasterAdmin === true
 const SORT_COLUMNS = Object.freeze({
   created_at: 'r.created_at',
   amount: 'r.amount',
@@ -24,6 +25,7 @@ function fingerprint(request, attachment = null) {
     request.amount,
     request.currency,
     request.reason,
+    request.payoutDestination?.phoneFingerprint || null,
     attachment?.sha256 || null,
   ])).digest('hex')
 }
@@ -104,8 +106,15 @@ async function submit({ pool, actor, request, attachment = null, idempotencyKey,
       assignment = assignmentResult.rows[0] || null
     }
 
-    let payoutDestination = null
-    if (['staff', 'admin'].includes(actor.role)) {
+    let payoutDestination = request.payoutDestination ? {
+      destination_id: null,
+      provider_code: request.payoutDestination.providerCode,
+      network_code: request.payoutDestination.networkCode,
+      phone_ciphertext: request.payoutDestination.phoneCiphertext,
+      encryption_key_id: request.payoutDestination.encryptionKeyId,
+      phone_last4: request.payoutDestination.phoneLast4,
+    } : null
+    if (!payoutDestination && ['staff', 'admin'].includes(actor.role)) {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`ew-payout-destination:${actor.customerId.toLowerCase()}`])
       const destinationResult = await client.query(`
         SELECT destination_id, provider_code, network_code, phone_ciphertext, encryption_key_id, phone_last4
@@ -288,14 +297,14 @@ async function listApprovals({ pool, actor, filters }) {
       FROM expense_requests r
       JOIN expense_categories category ON category.category_id = r.category_id
       LEFT JOIN expense_categories subcategory ON subcategory.category_id = r.subcategory_id
-     WHERE r.requester_customer_id <> $2
+     WHERE (r.requester_customer_id <> $2 OR ($5::boolean AND $1::text = 'admin'))
        AND (
          ($1::text = 'admin' AND r.status IN ('PENDING_ADMIN', 'MANAGER_APPROVED'))
          OR ($1::text = 'staff' AND r.reviewer_manager_customer_id = $2 AND r.status IN ('PENDING_MANAGER', 'MANAGER_APPROVAL_PENDING_HOLD'))
        )
      ORDER BY ${column} ${filters.direction.toUpperCase()}, r.request_id DESC
      LIMIT $3 OFFSET $4
-  `, [actor.role, actor.customerId, filters.limit + 1, filters.offset])
+  `, [actor.role, actor.customerId, filters.limit + 1, filters.offset, canMasterAdminSelfReview(actor)])
   const hasMore = result.rows.length > filters.limit
   return {
     items: hasMore ? result.rows.slice(0, filters.limit) : result.rows,
@@ -374,7 +383,8 @@ async function reject({ pool, actor, requestId, stage, reason }) {
     `, [requestId])
     const request = selected.rows[0]
     if (!request) throw new RequestRepositoryError('REQUEST_NOT_FOUND', 404)
-    if (String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase()) {
+    if (String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase() &&
+        !(stage === 'admin' && canMasterAdminSelfReview(actor))) {
       throw new RequestRepositoryError('SELF_REVIEW_PROHIBITED', 403)
     }
 
@@ -451,7 +461,7 @@ async function prepareAdminRejection({ pool, actor, requestId, reason, requestId
     const request = selected.rows[0]
     if (!request) throw new RequestRepositoryError('REQUEST_NOT_FOUND', 404)
     if (String(actor.role).toLowerCase() !== 'admin') throw new RequestRepositoryError('DECISION_NOT_ALLOWED', 403)
-    if (String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase()) {
+    if (String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase() && !canMasterAdminSelfReview(actor)) {
       throw new RequestRepositoryError('SELF_REVIEW_PROHIBITED', 403)
     }
     if (request.status === 'REJECTED_ADMIN') {
@@ -514,7 +524,7 @@ async function completeAdminRejection({ pool, actor, requestId, operationId, fin
     `, [requestId])
     const request = selected.rows[0]
     if (!request) throw new RequestRepositoryError('REQUEST_NOT_FOUND', 404)
-    if (String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase()) throw new RequestRepositoryError('SELF_REVIEW_PROHIBITED', 403)
+    if (String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase() && !canMasterAdminSelfReview(actor)) throw new RequestRepositoryError('SELF_REVIEW_PROHIBITED', 403)
     if (String(actor.role).toLowerCase() !== 'admin' || String(request.finance_release_actor_customer_id).toLowerCase() !== String(actor.customerId).toLowerCase()) {
       throw new RequestRepositoryError('DECISION_NOT_ALLOWED', 403)
     }

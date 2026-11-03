@@ -91,6 +91,7 @@ class ItcIdentityClient {
       return {
         customerId: customer.customer_id,
         role: String(customer.expense_warrior_role).toLowerCase(),
+        isMasterAdmin: String(customer.expense_warrior_role).toLowerCase() === 'admin' && customer.is_master_admin === true,
         active: true,
       }
     } catch (error) {

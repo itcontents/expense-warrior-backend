@@ -60,7 +60,9 @@ function columnGrants(sql, privilege) {
 
 test('runtime privilege migration is included after the existing migration chain', async () => {
   const migrations = await collectMigrations()
-  assert.equal(migrations.at(-1)?.name, migrationName)
+  const runtimeIndex = migrations.findIndex(({ name }) => name === migrationName)
+  assert.ok(runtimeIndex >= 0 && runtimeIndex < migrations.length - 1)
+  assert.equal(migrations.at(-1)?.name, '0019_request_specific_payout_destinations.sql')
   assert.ok(MIGRATION_POSTCONDITIONS[migrationName])
 })
 

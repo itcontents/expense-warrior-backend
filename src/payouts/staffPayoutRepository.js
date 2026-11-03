@@ -79,7 +79,7 @@ async function loadPayout(client, requestId, { lock = false } = {}) {
 
 function assertAdminCanAct(request, actor) {
   if (String(actor?.role || '').toLowerCase() !== 'admin') throw new StaffPayoutRepositoryError('FORBIDDEN', 403)
-  if (String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase()) {
+  if (String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase() && actor?.isMasterAdmin !== true) {
     throw new StaffPayoutRepositoryError('SELF_REVIEW_PROHIBITED', 403)
   }
 }
@@ -159,7 +159,7 @@ async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit 
       await client.query(`
         INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, request_id, metadata)
         VALUES ($1, 'request.admin.reservation_started', 'expense_request', $2, $3, $4::jsonb)
-      `, [actor.customerId, requestId, requestIdForAudit, JSON.stringify({ operation_id: operationId, expense_category_code: expenseCategoryCode })])
+      `, [actor.customerId, requestId, requestIdForAudit, JSON.stringify({ operation_id: operationId, expense_category_code: expenseCategoryCode, self_approval: String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase() })])
       await client.query('COMMIT')
       return {
         request: { ...request, finance_operation_id: operationId, finance_idempotency_key: idempotencyKey,
@@ -217,7 +217,7 @@ async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit 
     await client.query(`
       INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, request_id, metadata)
       VALUES ($1, 'request.admin.payout_started', 'expense_request', $2, $3, $4::jsonb)
-    `, [actor.customerId, requestId, requestIdForAudit, JSON.stringify({ payout_id: payoutId, payout_attempt_id: payoutAttemptId, amount: request.amount, currency: request.currency })])
+    `, [actor.customerId, requestId, requestIdForAudit, JSON.stringify({ payout_id: payoutId, payout_attempt_id: payoutAttemptId, amount: request.amount, currency: request.currency, self_approval: String(request.requester_customer_id).toLowerCase() === String(actor.customerId).toLowerCase() })])
     await client.query('COMMIT')
     return { request: updatedRequest.rows[0], payout: publicPayout(created.rows[0]), shouldInitiate: true, replayed: false }
   } catch (error) {

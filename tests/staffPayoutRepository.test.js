@@ -79,6 +79,42 @@ test('retry rejects non-admin and self review before inserting an attempt', asyn
   }
 })
 
+test('verified master admin can continue their own payout review', async () => {
+  const master = { ...actor, isMasterAdmin: true }
+  const { repository, calls } = fixture({ currentRequest: { ...request, requester_customer_id: master.customerId } })
+  const result = await repository.preparePayoutRetry({ actor: master, requestId })
+  assert.equal(result.requiresReservation, true)
+  assert.ok(calls.some(({ sql }) => sql.includes('INSERT INTO request_payout_attempts')))
+})
+
+test('verified master admin can reserve funds for their own pending request', async () => {
+  const master = { ...actor, isMasterAdmin: true }
+  const pending = {
+    ...request,
+    requester_customer_id: master.customerId,
+    status: 'PENDING_ADMIN',
+    finance_reservation_state: null,
+    finance_hold_id: null,
+    finance_expense_category_code: 'office_supplies',
+    finance_expense_account_code: '6100',
+    mapped_itc_expense_category_code: 'office_supplies',
+    payout_provider_code: 'pawapay',
+    payout_provider_account_id: null,
+    payout_provider_account_version: null,
+    reviewer_manager_customer_id: null,
+  }
+  const { repository } = fixture({ currentRequest: pending, payout: null, prior: null })
+  const prepared = await repository.prepareFinalApproval({
+    actor: master,
+    requestId,
+    providerCode: 'pawapay',
+    providerAccountId: randomUUID(),
+    providerAccountVersion: 2,
+  })
+  assert.equal(prepared.requiresReservation, true)
+  assert.equal(prepared.reservation.requesterCustomerId, master.customerId)
+})
+
 const reserving = { ...failed, payout_id: randomUUID(), payout_attempt_id: randomUUID(), state: 'RESERVING',
   reservation_operation_id: randomUUID(), reservation_idempotency_key: 'retry-operation-key', reservation_hold_id: null,
   reservation_state: 'UNKNOWN', release_state: null }

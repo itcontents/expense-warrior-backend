@@ -27,6 +27,32 @@ test('submitRequest_requiresIdempotencyKey', async () => {
   )
 })
 
+test('submitRequest_encryptsAndPinsARequestSpecificDestination', async () => {
+  let submitted
+  const phoneVault = {
+    encrypt: () => ({ keyId: 'active-key', ciphertext: 'opaque-encrypted-envelope' }),
+    fingerprint: () => 'keyed-fingerprint',
+  }
+  const providerRegistry = { getNetworks: (provider, operation) => {
+    assert.equal(provider, 'pawapay')
+    assert.equal(operation, 'payout')
+    return [{ code: 'AIRTEL_OAPI_ZMB' }]
+  } }
+  const repository = repositoryWith({ submit: async (value) => { submitted = value; return { request: { status: 'PENDING_ADMIN' } } } })
+  const service = createRequestService({ repository, phoneVault, providerRegistry })
+  await service.submitRequest(actor, {
+    category_id: '45a79d36-1c70-4622-84d2-145a26f288d3', amount: '25.00',
+    payout_provider_code: 'pawapay', payout_network_code: 'AIRTEL_OAPI_ZMB', payout_phone_number: '+260 975 123 456',
+  }, idempotencyKey)
+  assert.deepEqual(submitted.request.payoutDestination, {
+    providerCode: 'pawapay', networkCode: 'AIRTEL_OAPI_ZMB',
+    phoneCiphertext: 'opaque-encrypted-envelope', encryptionKeyId: 'active-key',
+    phoneFingerprint: 'keyed-fingerprint', phoneLast4: '3456',
+  })
+  assert.equal(JSON.stringify(submitted).includes('260975123456'), false)
+  assert.equal(submitted.request.payoutDestinationInput, undefined)
+})
+
 test('submitRequest_removesRetryUploadWhenRepositoryReturnsPreviousIdempotentRequest', async () => {
   const removed = []
   let submitted
@@ -72,7 +98,7 @@ test('listRequests_scopesStaffAndManagerThroughRepositoryActorContext', async ()
   await service.listRequests(actor, { limit: '25', offset: '50', sort: 'created_at', direction: 'asc' })
 
   assert.deepEqual(input, {
-    actor: { customerId: actor.customerId, role: 'staff' },
+    actor: { customerId: actor.customerId, role: 'staff', isMasterAdmin: false },
     filters: { limit: 25, offset: 50, sort: 'created_at', direction: 'asc' },
   })
 })
@@ -89,7 +115,7 @@ test('listApprovals_scopesQueueToVerifiedActor', async () => {
   await service.listApprovals(actor, { limit: 20 })
 
   assert.deepEqual(input, {
-    actor: { customerId: actor.customerId, role: 'staff' },
+    actor: { customerId: actor.customerId, role: 'staff', isMasterAdmin: false },
     filters: { limit: 20, offset: 0, sort: 'created_at', direction: 'desc' },
   })
 })
@@ -155,7 +181,7 @@ test('rejectRequest_requiresAReasonAndPassesVerifiedActorScope', async () => {
 
   assert.equal(result.status, 'REJECTED_MANAGER')
   assert.deepEqual(received, {
-    actor: { customerId: actor.customerId, role: 'staff' },
+    actor: { customerId: actor.customerId, role: 'staff', isMasterAdmin: false },
     requestId,
     stage: 'manager',
     reason: 'Not enough detail',

@@ -12,7 +12,10 @@ const requestSchema = Joi.object({
   subcategory_id: Joi.string().guid().allow(null),
   amount: Joi.string().pattern(amountPattern).required(),
   reason: Joi.string().max(2000).allow('', null),
-})
+  payout_provider_code: Joi.string().pattern(/^[a-z][a-z0-9_]{1,31}$/),
+  payout_network_code: Joi.string().pattern(/^[A-Z][A-Z0-9_]{1,39}$/),
+  payout_phone_number: Joi.string().trim().min(9).max(20),
+}).and('payout_provider_code', 'payout_network_code', 'payout_phone_number').unknown(false)
 const filterSchema = Joi.object({
   limit: Joi.number().integer().min(1).max(100),
   offset: Joi.number().integer().min(0).max(1000000),
@@ -35,7 +38,7 @@ function createRequestRouter({ identityClient, requestService, pool, attachmentS
   const requireSession = createRequireItcSession(identityClient)
   const evidenceUpload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 4, fieldSize: 2000 },
+    limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 7, fieldSize: 2000 },
   }).single('evidence')
   const parseEvidence = (req, res, next) => evidenceUpload(req, res, (error) => {
     if (!error) return next()
@@ -72,6 +75,7 @@ function createRequestRouter({ identityClient, requestService, pool, attachmentS
       can_view_approvals: canViewApprovals,
       can_final_approve: role === 'admin' && staffPayoutsEnabled === true,
       can_bulk_approve: role === 'admin' && staffPayoutsEnabled === true,
+      is_master_admin: req.actor.isMasterAdmin === true,
     } })
   })
 

@@ -147,7 +147,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
       const walletBalanceService = createWalletBalanceService({ providerRegistry: paymentProviders, snapshotRepository })
       app.use('/api/v1/expense-warrior', createWalletBalanceRouter({ identityClient, walletBalanceService, itcFinanceClient, snapshotRepository }))
     }
-    const requestService = createRequestService({ repository: requestRepository, attachmentStorage, financeClient: itcFinanceClient, phoneVault })
+    const requestService = createRequestService({ repository: requestRepository, attachmentStorage, financeClient: itcFinanceClient, phoneVault, providerRegistry: paymentProviders })
     const managerAssignmentRepository = createManagerAssignmentRepository({ pool })
     const managerAssignmentService = createManagerAssignmentService({ repository: managerAssignmentRepository })
     const reportService = createReportService({ pool, itcFinanceClient })

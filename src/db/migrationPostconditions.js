@@ -132,6 +132,14 @@ const MIGRATION_POSTCONDITIONS = Object.freeze({
     privileges: runtimePrivileges,
     columnPrivileges: runtimeColumnPrivileges,
   },
+  '0019_request_specific_payout_destinations.sql': {
+    columns: { expense_requests: ['payout_destination_id', 'payout_provider_code', 'payout_network_code', 'payout_phone_ciphertext', 'payout_encryption_key_id', 'payout_phone_last4'] },
+    constraints: [
+      { name: 'expense_requests_payout_snapshot_chk', requiredTokens: ['payout_network_code', 'payout_phone_ciphertext', 'payout_encryption_key_id', 'payout_phone_last4'], forbiddenTokens: ['payout_destination_id is not null'] },
+      { name: 'expense_requests_payout_provider_snapshot_chk', requiredTokens: ['payout_destination_id', 'payout_provider_code', 'payout_network_code'] },
+      { name: 'expense_requests_payout_provider_account_pair_check', requiredTokens: ['payout_provider_account_id', 'payout_provider_account_version', 'payout_provider_code'] },
+    ],
+  },
 })
 
 async function verifyMigrationPostconditions(client, migrations) {
@@ -382,7 +390,23 @@ async function verifyMigrationPostconditions(client, migrations) {
     ]
     const passed = checks.length > 0 && checks.every(({ passed: checkPassed }) => checkPassed)
     const presentCount = checks.filter(({ passed: checkPassed }) => checkPassed).length
-    resultByName.set(migration.name, { passed, presentCount, totalCount: checks.length, failedChecks: checks.filter(({ passed: checkPassed }) => !checkPassed).map(({ name }) => name) })
+    resultByName.set(migration.name, {
+      passed,
+      presentCount,
+      totalCount: checks.length,
+      failedChecks: checks.filter(({ passed: checkPassed }) => !checkPassed).map(({ name }) => name),
+      ...(spec.constraints?.length ? {
+        constraintDetails: spec.constraints.map(({ name }) => {
+          const actual = foundConstraints.get(name)
+          return {
+            name,
+            present: Boolean(actual),
+            validated: actual?.is_validated === true,
+            definition: actual?.definition || null,
+          }
+        }),
+      } : {}),
+    })
     if (!passed) blockers.push('POSTCONDITION_FAILED')
   }
 
@@ -439,6 +463,7 @@ function isHealthyConstraint(row, spec) {
   if (!row || row.constraint_type !== 'c' || row.is_validated !== true || typeof row.definition !== 'string') return false
   const definition = row.definition.toLowerCase()
   if (!(spec.requiredTokens || []).every((token) => definition.includes(token.toLowerCase()))) return false
+  if ((spec.forbiddenTokens || []).some((token) => definition.includes(token.toLowerCase()))) return false
   const normalizedDefinition = definition.replace(/[()]/g, ' ').replace(/\s+/g, ' ')
   if (spec.minimum !== undefined &&
       !new RegExp(`(?:>=\\s*${spec.minimum}(?:\\D|$)|between\\s+${spec.minimum}\\s+and\\s+${spec.maximum}(?:\\D|$))`).test(normalizedDefinition)) return false
