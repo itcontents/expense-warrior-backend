@@ -145,7 +145,9 @@ class ItcIdentityClient {
       if (Buffer.byteLength(body, 'utf8') > 262144) throw new ItcIdentityError('ITC_IDENTITY_RESPONSE_INVALID', 502)
       let payload
       try { payload = JSON.parse(body) } catch { throw new ItcIdentityError('ITC_IDENTITY_RESPONSE_INVALID', 502) }
-      const staff = payload?.data?.members
+      // The ITC directory endpoint currently returns this collection as `staff`.
+      // Accept `members` as well for compatible identity-service versions.
+      const staff = payload?.data?.staff ?? payload?.data?.members
       if (payload?.success !== true || !Array.isArray(staff) || staff.length > limit || staff.some((person) =>
         !CUSTOMER_ID_PATTERN.test(String(person?.customer_id || '')) ||
         !['admin', 'staff'].includes(String(person?.expense_warrior_role || '').toLowerCase()) ||

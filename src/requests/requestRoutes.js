@@ -33,6 +33,37 @@ function respondWithError(res, error) {
   return res.status(503).json({ error: { code: 'REQUEST_SERVICE_UNAVAILABLE', message: 'Requests are temporarily unavailable' } })
 }
 
+async function addRequesterNames(result, identityClient, req) {
+  const items = result?.items || []
+  const ids = [...new Set(items.map((item) => item.requester_customer_id).filter(Boolean))]
+  if (!ids.length || typeof identityClient.listStaffDirectory !== 'function') return result
+
+  try {
+    const people = await identityClient.listStaffDirectory(req.headers.cookie, {
+      ids,
+      limit: ids.length,
+      offset: 0,
+    }, req.requestId)
+    const names = new Map(people.map((person) => {
+      const name = [person.first_name, person.last_name].filter(Boolean).join(' ').trim()
+      return [String(person.customer_id).toLowerCase(), name]
+    }))
+    return {
+      ...result,
+      items: items.map((item) => ({
+        ...item,
+        requester_display_name: names.get(String(item.requester_customer_id).toLowerCase()) || null,
+      })),
+    }
+  } catch (_directoryError) {
+    // Keep review queues available if the separate staff directory service is unavailable.
+    return {
+      ...result,
+      items: items.map((item) => ({ ...item, requester_display_name: null })),
+    }
+  }
+}
+
 function createRequestRouter({ identityClient, requestService, pool, attachmentStorage, staffPayoutsEnabled = false }) {
   const router = express.Router()
   const requireSession = createRequireItcSession(identityClient)
@@ -148,7 +179,8 @@ function createRequestRouter({ identityClient, requestService, pool, attachmentS
 
     try {
       const result = await requestService.listApprovals(req.actor, value)
-      return res.status(200).json({ data: result })
+      const namedResult = await addRequesterNames(result, identityClient, req)
+      return res.status(200).json({ data: namedResult })
     } catch (cause) {
       return respondWithError(res, cause)
     }
