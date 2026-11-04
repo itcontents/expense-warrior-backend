@@ -137,7 +137,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
         financeClient: itcFinanceClient,
         phoneVault,
       })
-      app.use('/api/v1/expense-warrior/admin', createStaffPayoutRouter({ identityClient, payoutService }))
+      app.use('/api/v1/expense-warrior/admin', createStaffPayoutRouter({ identityClient, payoutService, logger }))
     }
     if (paymentProviders) {
       const { createWalletBalanceRouter } = require('./wallet/walletBalanceRoutes')

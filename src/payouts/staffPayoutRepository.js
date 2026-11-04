@@ -107,11 +107,11 @@ async function prepareFinalApproval({ pool, actor, requestId, requestIdForAudit 
       throw new StaffPayoutRepositoryError('DECISION_NOT_ALLOWED', 409)
     }
 
+    // The request row is already locked; decisions are append-only and the app role has no UPDATE grant here.
     const priorAdminDecision = await client.query(`
       SELECT action, actor_customer_id
         FROM request_decisions
        WHERE request_id = $1 AND stage = 'admin'
-       FOR UPDATE
     `, [requestId])
     if (priorAdminDecision.rows[0]?.action === 'reject') {
       throw new StaffPayoutRepositoryError('DECISION_NOT_ALLOWED', 409)

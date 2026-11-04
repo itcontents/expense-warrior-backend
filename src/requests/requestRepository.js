@@ -398,11 +398,11 @@ async function reject({ pool, actor, requestId, stage, reason }) {
       throw new RequestRepositoryError('FINANCE_RELEASE_REQUIRED', 409)
     }
 
+    // The request row is already locked; decisions are append-only and the app role has no UPDATE grant here.
     const existing = await client.query(`
       SELECT actor_customer_id, action, reason
         FROM request_decisions
        WHERE request_id = $1 AND stage = $2
-       FOR UPDATE
     `, [requestId, stage])
     if (existing.rowCount) {
       const previous = existing.rows[0]
@@ -716,11 +716,11 @@ async function completeManagerApproval({ pool, actor, requestId, operationId, id
       throw new RequestRepositoryError('DECISION_NOT_ALLOWED', 403)
     }
 
+    // The request row is already locked; decisions are append-only and the app role has no UPDATE grant here.
     const priorDecision = await client.query(`
       SELECT actor_customer_id, action
         FROM request_decisions
        WHERE request_id = $1 AND stage = 'manager'
-       FOR UPDATE
     `, [requestId])
     if (priorDecision.rowCount) throw new RequestRepositoryError('DECISION_ALREADY_RECORDED', 409)
 
