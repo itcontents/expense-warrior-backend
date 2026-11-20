@@ -59,7 +59,7 @@ const runtimeColumnPrivileges = runtimeTables.flatMap((table) => ['UPDATE'].flat
       : table === 'idempotency_records' ? ['resource_id', 'response_json', 'completed_at', 'request_hash']
         : table === 'expense_requests' ? [...runtimeColumnUpdates.expense_requests, 'amount', 'requester_customer_id', 'payout_phone_ciphertext']
           : table === 'payment_link_attempts' ? [...runtimeColumnUpdates.payment_link_attempts, 'amount', 'provider_transaction_id', 'provider_account_id']
-        : table === 'payment_links' ? ['disabled_at', 'disabled_by_customer_id', 'status', 'public_token_hash']
+        : table === 'payment_links' ? ['disabled_at', 'disabled_by_customer_id', 'status']
           : table === 'request_payout_attempts' ? [...runtimeColumnUpdates.request_payout_attempts, 'amount', 'payout_id', 'provider_account_id']
           : table === 'staff_payout_destinations' ? ['superseded_at', 'phone_ciphertext']
             : []
