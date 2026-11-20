@@ -25,17 +25,18 @@ function createMemoryPool() {
           }
           if (sql.includes('SELECT i.request_fingerprint')) return { rows: joinedRequest(params[0], params[1]) }
           if (sql.includes('INSERT INTO payment_links')) {
-            const id = `11111111-1111-4111-8111-${String(state.nextId++).padStart(12, '0')}`
+            const id = params[0]
             const link = {
               payment_link_id: id,
-              amount: params[0],
+              amount: params[1],
               currency: 'ZMW',
-              description: params[1],
+              description: params[2],
               status: 'ACTIVE',
               created_at: new Date().toISOString(),
-              collection_target_type: params[4],
-              revenue_account_code: params[5],
-              customer_id: params[6],
+              collection_target_type: params[7],
+              revenue_account_code: params[8],
+              customer_id: params[9],
+              url_recoverable: true,
             }
             state.links.set(id, link)
             return { rows: [link] }
@@ -78,7 +79,10 @@ const input = {
   amount: '75.50',
   description: 'Workshop supplies',
   target: { type: 'REVENUE', revenueAccountCode: '4100' },
+  paymentLinkId: '11111111-1111-4111-8111-111111111111',
   tokenHash: 'a'.repeat(64),
+  tokenCiphertext: 'opaque-ciphertext',
+  tokenEncryptionKeyId: 'test-key',
   requestFingerprint: 'b'.repeat(64),
   idempotencyKey: 'c3d5fcb6-9424-41b8-9f8b-5f14bb8e3f66',
   actorCustomerId: 'd9cc33b3-b9ae-4dd9-9d27-2214c671b7c2',

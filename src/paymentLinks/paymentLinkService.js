@@ -30,7 +30,7 @@ class PaymentLinkError extends Error {
   }
 }
 
-function createPaymentLinkService({ repository, hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex') } = {}) {
+function createPaymentLinkService({ repository, tokenVault, hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex') } = {}) {
   if (!repository) throw new TypeError('A payment-link repository is required')
   return Object.freeze({
     async createLink(actor, input, idempotencyKey) {
@@ -40,6 +40,9 @@ function createPaymentLinkService({ repository, hashToken = (token) => crypto.cr
           !UUID.test(String(actor?.customerId || '')) || !UUID.test(String(idempotencyKey || '')) ||
           typeof input.publicToken !== 'string' || input.publicToken.length < 40 || input.publicToken.length > 128 || !/^[A-Za-z0-9_-]+$/.test(input.publicToken)) throw new PaymentLinkError('PAYMENT_LINK_INPUT_INVALID', 400)
       const tokenHash = hashToken(input.publicToken)
+      if (!tokenVault || typeof tokenVault.encrypt !== 'function') throw new PaymentLinkError('PAYMENT_LINK_TOKEN_VAULT_UNAVAILABLE')
+      const paymentLinkId = crypto.randomUUID()
+      const encryptedToken = tokenVault.encrypt({ linkId: paymentLinkId, token: input.publicToken })
       const requestFingerprint = crypto.createHash('sha256').update(JSON.stringify([
         input.amount,
         input.description.trim(),
@@ -52,7 +55,10 @@ function createPaymentLinkService({ repository, hashToken = (token) => crypto.cr
         amount: input.amount,
         description: input.description.trim(),
         target,
+        paymentLinkId,
         tokenHash,
+        tokenCiphertext: encryptedToken.ciphertext,
+        tokenEncryptionKeyId: encryptedToken.keyId,
         idempotencyKey,
         requestFingerprint,
         actorCustomerId: actor.customerId,
@@ -60,6 +66,20 @@ function createPaymentLinkService({ repository, hashToken = (token) => crypto.cr
       return { link: result.link || result, token: input.publicToken, replayed: Boolean(result.replayed) }
     },
     listLinks(options) { return repository.list(options) },
+    async getLinkToken(linkId, actor) {
+      if (!UUID.test(String(linkId || '')) || !UUID.test(String(actor?.customerId || ''))) throw new PaymentLinkError('PAYMENT_LINK_INPUT_INVALID', 400)
+      if (!tokenVault || typeof tokenVault.decrypt !== 'function') throw new PaymentLinkError('PAYMENT_LINK_TOKEN_VAULT_UNAVAILABLE')
+      const stored = await repository.getToken(linkId, actor.customerId)
+      return { link: stored.link, token: tokenVault.decrypt({ linkId, keyId: stored.keyId, ciphertext: stored.ciphertext }) }
+    },
+    async replaceLinkToken(linkId, actor) {
+      if (!UUID.test(String(linkId || '')) || !UUID.test(String(actor?.customerId || ''))) throw new PaymentLinkError('PAYMENT_LINK_INPUT_INVALID', 400)
+      if (!tokenVault || typeof tokenVault.encrypt !== 'function') throw new PaymentLinkError('PAYMENT_LINK_TOKEN_VAULT_UNAVAILABLE')
+      const token = crypto.randomBytes(32).toString('base64url')
+      const encryptedToken = tokenVault.encrypt({ linkId, token })
+      const link = await repository.replaceToken(linkId, hashToken(token), encryptedToken.ciphertext, encryptedToken.keyId, actor.customerId)
+      return { link, token }
+    },
     disableLink(linkId, actor) {
       if (!UUID.test(String(linkId || '')) || !UUID.test(String(actor?.customerId || ''))) throw new PaymentLinkError('PAYMENT_LINK_INPUT_INVALID', 400)
       return repository.disable(linkId, actor.customerId)

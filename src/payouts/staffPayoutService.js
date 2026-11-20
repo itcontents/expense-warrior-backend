@@ -376,7 +376,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
         const definitiveFailure = new Set([
           'INSUFFICIENT_FUNDS', 'TREASURY_MAPPING_UNAVAILABLE', 'TREASURY_ACCOUNT_UNAVAILABLE',
           'PROVIDER_ACCOUNT_MAPPING_UNAVAILABLE', 'EXPENSE_CATEGORY_NOT_POSTABLE',
-          'IDENTITY_UNAVAILABLE', 'INVALID_RESERVATION',
+          'IDENTITY_UNAVAILABLE', 'INVALID_RESERVATION', 'SELF_APPROVAL_PROHIBITED',
         ]).has(code)
         try {
           await repository.markAdminReservationFailure({
@@ -387,7 +387,7 @@ function createStaffPayoutService({ repository, providerRegistry, financeClient,
         } catch {
           throw new StaffPayoutServiceError('APPROVAL_RECONCILIATION_REQUIRED', 503)
         }
-        if (definitiveFailure) throw new StaffPayoutServiceError(code, 422)
+        if (definitiveFailure) throw new StaffPayoutServiceError(code, code === 'SELF_APPROVAL_PROHIBITED' ? 403 : 422)
         return { request: { request_id: requestId, status: 'PENDING_ADMIN' }, pending: true, errorCode: code }
       }
     }

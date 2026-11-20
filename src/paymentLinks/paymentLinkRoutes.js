@@ -109,6 +109,24 @@ function createPaymentLinkRouter({ identityClient, paymentLinkService, itcFinanc
     if (!UUID.test(req.params.link_id)) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_LINK', message: 'The payment link is invalid' } })
     try { return res.json({ data: await paymentLinkService.disableLink(req.params.link_id, req.actor) }) } catch (cause) { return fail(res, cause) }
   })
+  router.post('/payment-links/:link_id/retrieve-token', requireSession, adminOnly, async (req, res) => {
+    if (!UUID.test(req.params.link_id)) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_LINK', message: 'The payment link is invalid' } })
+    if (typeof paymentLinkService.getLinkToken !== 'function') return fail(res, new Error('Payment-link retrieval is unavailable'))
+    res.set('Cache-Control', 'private, no-store')
+    try {
+      const result = await paymentLinkService.getLinkToken(req.params.link_id, req.actor)
+      return res.json({ data: result })
+    } catch (cause) { return fail(res, cause) }
+  })
+  router.post('/payment-links/:link_id/replace-token', requireSession, adminOnly, async (req, res) => {
+    if (!UUID.test(req.params.link_id)) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_LINK', message: 'The payment link is invalid' } })
+    if (typeof paymentLinkService.replaceLinkToken !== 'function') return fail(res, new Error('Payment-link replacement is unavailable'))
+    try {
+      const result = await paymentLinkService.replaceLinkToken(req.params.link_id, req.actor)
+      res.set('Cache-Control', 'private, no-store')
+      return res.json({ data: result })
+    } catch (cause) { return fail(res, cause) }
+  })
   return router
 }
 

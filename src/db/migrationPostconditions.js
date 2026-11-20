@@ -143,6 +143,11 @@ const MIGRATION_POSTCONDITIONS = Object.freeze({
   '0020_request_cancellation.sql': {
     constraints: [{ name: 'expense_requests_status_check', literals: ['PENDING_MANAGER', 'MANAGER_APPROVAL_PENDING_HOLD', 'MANAGER_APPROVED', 'PENDING_ADMIN', 'APPROVED_AWAITING_PAYOUT', 'PAYOUT_PENDING', 'PAID', 'PAYOUT_FAILED', 'REJECTED_MANAGER', 'REJECTED_ADMIN', 'CANCELED'], requiredTokens: ['status'] }],
   },
+  '0021_payment_link_token_replacement.sql': {
+    columns: { payment_links: ['public_token_ciphertext', 'public_token_encryption_key_id'] },
+    constraints: [{ name: 'payment_links_public_token_encryption_pair_check', requiredTokens: ['public_token_ciphertext', 'public_token_encryption_key_id'] }],
+    columnPrivileges: ['public_token_hash', 'public_token_ciphertext', 'public_token_encryption_key_id'].map((column) => ({ table: 'payment_links', column, role: 'expense_warrior_app', privilege: 'UPDATE', granted: true })),
+  },
 })
 
 async function verifyMigrationPostconditions(client, migrations) {

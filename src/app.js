@@ -7,7 +7,7 @@ function validRequestId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value)
 }
 
-function createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault,
+function createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault, paymentLinkTokenVault,
   callbackInboxEnabled = false, callbackInboxRepository = null, collectionPaymentsEnabled = false, staffPayoutsEnabled = false,
   browserOrigins = null, nodeEnv = process.env.NODE_ENV || 'development', logger = console }) {
   if (!pool || typeof pool.query !== 'function') {
@@ -87,7 +87,7 @@ function createApp({ pool, identityClient, attachmentStorage, paymentProviders, 
     const { createPaymentLinkRepository } = require('./paymentLinks/paymentLinkRepository')
     const { createPaymentLinkService } = require('./paymentLinks/paymentLinkService')
     const paymentLinkRepository = createPaymentLinkRepository({ pool })
-    paymentLinkService = createPaymentLinkService({ repository: paymentLinkRepository })
+    paymentLinkService = createPaymentLinkService({ repository: paymentLinkRepository, tokenVault: paymentLinkTokenVault })
     if (collectionPaymentsEnabled === true) {
       if (!paymentProviders) throw new TypeError('Payment-link collections require a signed provider registry')
       const { createPublicPaymentService } = require('./paymentLinks/publicPaymentService')

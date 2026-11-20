@@ -3,7 +3,8 @@ const { PaymentLinkError } = require('./paymentLinkService')
 const CREATE_IDEMPOTENCY_LOOKUP_SQL = `
   SELECT i.request_fingerprint, l.payment_link_id, l.amount::text, l.currency, l.description,
          l.status, l.created_at, l.collection_target_type, l.revenue_account_code,
-         l.customer_id
+         l.customer_id,
+         (l.public_token_ciphertext IS NOT NULL AND l.public_token_encryption_key_id IS NOT NULL) AS url_recoverable
     FROM payment_link_creation_requests i
     JOIN payment_links l ON l.payment_link_id = i.payment_link_id
    WHERE i.actor_customer_id = $1 AND i.idempotency_key = $2
@@ -163,7 +164,7 @@ function createPaymentLinkRepository({ pool } = {}) {
         throw new PaymentLinkError('PAYMENT_COLLECTION_STATE_CONFLICT', 409)
       } finally { client.release() }
     },
-    async create({ amount, description, target, tokenHash, idempotencyKey, requestFingerprint, actorCustomerId }) {
+    async create({ amount, description, target, paymentLinkId, tokenHash, tokenCiphertext, tokenEncryptionKeyId, idempotencyKey, requestFingerprint, actorCustomerId }) {
       const client = await pool.connect()
       let operation = 'begin'
       try {
@@ -180,12 +181,14 @@ function createPaymentLinkRepository({ pool } = {}) {
         operation = 'payment_link_insert'
         const result = await client.query(`
           INSERT INTO payment_links (
-            amount, currency, description, public_token_hash, status, created_by_customer_id,
+            payment_link_id, amount, currency, description, public_token_hash, public_token_ciphertext,
+            public_token_encryption_key_id, status, created_by_customer_id,
             collection_target_type, revenue_account_code, customer_id
-          ) VALUES ($1, 'ZMW', $2, $3, 'ACTIVE', $4, $5, $6, $7)
+          ) VALUES ($1, $2, 'ZMW', $3, $4, $5, $6, 'ACTIVE', $7, $8, $9, $10)
           RETURNING payment_link_id, amount::text, currency, description, status, created_at,
-                    collection_target_type, revenue_account_code, customer_id
-        `, [amount, description, tokenHash, actorCustomerId, target.type,
+                    collection_target_type, revenue_account_code, customer_id, true AS url_recoverable
+        `, [paymentLinkId, amount, description, tokenHash, tokenCiphertext, tokenEncryptionKeyId,
+          actorCustomerId, target.type,
           target.revenueAccountCode || null, target.customerId || null])
         const link = result.rows[0]
         operation = 'audit_insert'
@@ -214,7 +217,8 @@ function createPaymentLinkRepository({ pool } = {}) {
           const priorResult = await pool.query(`
             SELECT i.request_fingerprint, l.payment_link_id, l.amount::text, l.currency, l.description,
                    l.status, l.created_at, l.collection_target_type, l.revenue_account_code,
-                   l.customer_id
+                   l.customer_id,
+                   (l.public_token_ciphertext IS NOT NULL AND l.public_token_encryption_key_id IS NOT NULL) AS url_recoverable
               FROM payment_link_creation_requests i
               JOIN payment_links l ON l.payment_link_id = i.payment_link_id
              WHERE i.actor_customer_id = $1 AND i.idempotency_key = $2
@@ -239,7 +243,8 @@ function createPaymentLinkRepository({ pool } = {}) {
     async list({ limit = 50, offset = 0 } = {}) {
       const result = await pool.query(`
         SELECT l.payment_link_id, l.amount::text, l.currency, l.description, l.status, l.created_at, l.disabled_at,
-               l.collection_target_type, l.revenue_account_code, l.customer_id
+               l.collection_target_type, l.revenue_account_code, l.customer_id,
+               (l.public_token_ciphertext IS NOT NULL AND l.public_token_encryption_key_id IS NOT NULL) AS url_recoverable
           FROM payment_links l
          ORDER BY l.created_at DESC, l.payment_link_id DESC
          LIMIT $1 OFFSET $2
@@ -277,6 +282,84 @@ function createPaymentLinkRepository({ pool } = {}) {
         await client.query('ROLLBACK').catch(() => {})
         if (error instanceof PaymentLinkError) throw error
         throw new PaymentLinkError('PAYMENT_LINK_DISABLE_UNAVAILABLE')
+      } finally { client.release() }
+    },
+    async getToken(linkId, actorCustomerId) {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const existing = await client.query(`
+          SELECT payment_link_id, amount::text, currency, description, status, created_at,
+                 collection_target_type, revenue_account_code, customer_id,
+                 public_token_ciphertext, public_token_encryption_key_id
+            FROM payment_links WHERE payment_link_id = $1 FOR UPDATE
+        `, [linkId])
+        const row = existing.rows[0]
+        if (!row) throw new PaymentLinkError('PAYMENT_LINK_NOT_FOUND', 404)
+        if (row.status !== 'ACTIVE') throw new PaymentLinkError('PAYMENT_LINK_NOT_ACTIVE', 409)
+        if (!row.public_token_ciphertext || !row.public_token_encryption_key_id) throw new PaymentLinkError('PAYMENT_LINK_TOKEN_NOT_RECOVERABLE', 409)
+        await client.query(`
+          INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
+          VALUES ($1, 'payment_link.token_retrieval_requested', 'payment_link', $2, '{}'::jsonb)
+        `, [actorCustomerId, linkId])
+        await client.query('COMMIT')
+        return {
+          link: {
+            payment_link_id: row.payment_link_id, amount: row.amount, currency: row.currency,
+            description: row.description, status: row.status, created_at: row.created_at,
+            collection_target_type: row.collection_target_type, revenue_account_code: row.revenue_account_code,
+            customer_id: row.customer_id, url_recoverable: true,
+          },
+          ciphertext: row.public_token_ciphertext,
+          keyId: row.public_token_encryption_key_id,
+        }
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {})
+        if (error instanceof PaymentLinkError) throw error
+        throw new PaymentLinkError('PAYMENT_LINK_TOKEN_UNAVAILABLE')
+      } finally { client.release() }
+    },
+    async replaceToken(linkId, tokenHash, tokenCiphertext, tokenEncryptionKeyId, actorCustomerId) {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const existing = await client.query(`
+          SELECT payment_link_id, amount::text, currency, description, status, created_at, disabled_at,
+                 collection_target_type, revenue_account_code, customer_id
+            FROM payment_links WHERE payment_link_id = $1 FOR UPDATE
+        `, [linkId])
+        const link = existing.rows[0]
+        if (!link) throw new PaymentLinkError('PAYMENT_LINK_NOT_FOUND', 404)
+        if (link.status !== 'ACTIVE') throw new PaymentLinkError('PAYMENT_LINK_NOT_ACTIVE', 409)
+        const unresolved = await client.query(`
+          SELECT attempt_id
+            FROM payment_link_attempts
+           WHERE payment_link_id = $1
+             AND state IN ('SUBMITTING', 'PENDING', 'UNKNOWN', 'VERIFIED_PENDING_LEDGER')
+           LIMIT 1
+        `, [linkId])
+        if (unresolved.rows.length) throw new PaymentLinkError('PAYMENT_LINK_PAYMENT_PENDING', 409)
+        const updated = await client.query(`
+          UPDATE payment_links
+             SET public_token_hash = $2,
+                 public_token_ciphertext = $3,
+                 public_token_encryption_key_id = $4
+           WHERE payment_link_id = $1 AND status = 'ACTIVE'
+          RETURNING payment_link_id, amount::text, currency, description, status, created_at, disabled_at,
+                    collection_target_type, revenue_account_code, customer_id, true AS url_recoverable
+        `, [linkId, tokenHash, tokenCiphertext, tokenEncryptionKeyId])
+        if (!updated.rows[0]) throw new PaymentLinkError('PAYMENT_LINK_NOT_ACTIVE', 409)
+        await client.query(`
+          INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, metadata)
+          VALUES ($1, 'payment_link.token_replaced', 'payment_link', $2, '{}'::jsonb)
+        `, [actorCustomerId, linkId])
+        await client.query('COMMIT')
+        return updated.rows[0]
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {})
+        if (error instanceof PaymentLinkError) throw error
+        if (error?.code === '23505') throw new PaymentLinkError('PAYMENT_LINK_TOKEN_CONFLICT', 409)
+        throw new PaymentLinkError('PAYMENT_LINK_REPLACEMENT_UNAVAILABLE')
       } finally { client.release() }
     },
   })

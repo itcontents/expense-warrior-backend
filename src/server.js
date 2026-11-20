@@ -10,6 +10,7 @@ const cloudinarySdk = require('cloudinary').v2
 const { createProviderRegistry } = require('./providers/providerRegistry')
 const { loadProviderAddons } = require('./providers/providerAddons')
 const { createPhoneVault } = require('./payoutDestinations/phoneVault')
+const { createPaymentLinkTokenVault } = require('./paymentLinks/paymentLinkTokenVault')
 
 function startServer() {
   const config = loadConfig()
@@ -35,7 +36,8 @@ function startServer() {
     additionalProviders: loadProviderAddons(config),
   })
   const phoneVault = createPhoneVault(config.payoutDestinations)
-  const app = createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault,
+  const paymentLinkTokenVault = createPaymentLinkTokenVault(config.payoutDestinations)
+  const app = createApp({ pool, identityClient, attachmentStorage, paymentProviders, itcFinanceClient, phoneVault, paymentLinkTokenVault,
     callbackInboxEnabled: config.pawaPay.callbackInboxEnabled,
     collectionPaymentsEnabled: config.pawaPay.collectionsEnabled,
     staffPayoutsEnabled: config.pawaPay.payoutsEnabled,
