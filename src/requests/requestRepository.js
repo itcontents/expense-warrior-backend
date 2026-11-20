@@ -267,6 +267,44 @@ async function listForActor({ pool, actor, filters }) {
   }
 }
 
+async function cancelOwnRequest({ pool, actor, requestId, requestIdForAudit = null }) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const selected = await client.query(`
+      SELECT request_id, requester_customer_id, status, finance_reservation_state
+        FROM expense_requests WHERE request_id = $1 FOR UPDATE
+    `, [requestId])
+    const request = selected.rows[0]
+    if (!request) throw new RequestRepositoryError('REQUEST_NOT_FOUND', 404)
+    if (String(request.requester_customer_id).toLowerCase() !== String(actor.customerId).toLowerCase()) {
+      throw new RequestRepositoryError('REQUEST_NOT_FOUND', 404)
+    }
+    if (request.status === 'CANCELED') {
+      await client.query('COMMIT')
+      return { request, replayed: true }
+    }
+    if (!['PENDING_MANAGER', 'PENDING_ADMIN'].includes(request.status) || request.finance_reservation_state) {
+      throw new RequestRepositoryError('REQUEST_CANNOT_BE_CANCELED', 409)
+    }
+    const updated = await client.query(`
+      UPDATE expense_requests
+         SET status = 'CANCELED', updated_at = transaction_timestamp()
+       WHERE request_id = $1
+       RETURNING request_id, requester_customer_id, status, amount::text AS amount, currency, created_at AS submitted_at
+    `, [requestId])
+    await client.query(`
+      INSERT INTO audit_events (actor_customer_id, action, target_type, target_id, request_id, metadata)
+      VALUES ($1, 'request.canceled', 'expense_request', $2, $3, $4::jsonb)
+    `, [actor.customerId, requestId, requestIdForAudit, JSON.stringify({ previous_status: request.status, status: 'CANCELED' })])
+    await client.query('COMMIT')
+    return { request: updated.rows[0], replayed: false }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally { client.release() }
+}
+
 async function listApprovals({ pool, actor, filters }) {
   const column = SORT_COLUMNS[filters.sort]
   if (!column || !['asc', 'desc'].includes(filters.direction)) {
@@ -816,6 +854,7 @@ function createRequestRepository({ pool, idFactory = randomUUID }) {
   return Object.freeze({
     submit: (input) => submit({ pool, ...input }),
     listForActor: (input) => listForActor({ pool, ...input }),
+    cancelOwnRequest: (input) => cancelOwnRequest({ pool, ...input }),
     listApprovals: (input) => listApprovals({ pool, ...input }),
     findAttachment: (input) => findAttachment({ pool, ...input }),
     revealPayoutDestination: (input) => revealPayoutDestination({ pool, ...input }),

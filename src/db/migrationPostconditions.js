@@ -140,6 +140,9 @@ const MIGRATION_POSTCONDITIONS = Object.freeze({
       { name: 'expense_requests_payout_provider_account_pair_check', requiredTokens: ['payout_provider_account_id', 'payout_provider_account_version', 'payout_provider_code'] },
     ],
   },
+  '0020_request_cancellation.sql': {
+    constraints: [{ name: 'expense_requests_status_check', literals: ['PENDING_MANAGER', 'MANAGER_APPROVAL_PENDING_HOLD', 'MANAGER_APPROVED', 'PENDING_ADMIN', 'APPROVED_AWAITING_PAYOUT', 'PAYOUT_PENDING', 'PAID', 'PAYOUT_FAILED', 'REJECTED_MANAGER', 'REJECTED_ADMIN', 'CANCELED'], requiredTokens: ['status'] }],
+  },
 })
 
 async function verifyMigrationPostconditions(client, migrations) {

@@ -173,6 +173,16 @@ function createRequestRouter({ identityClient, requestService, pool, attachmentS
     }
   })
 
+  router.post('/requests/:request_id/cancel', requireSession, async (req, res) => {
+    if (Object.keys(req.body || {}).length) return res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'The request is invalid' } })
+    try {
+      const result = await requestService.cancelOwnRequest(req.actor, req.params.request_id, req.requestId)
+      return res.status(200).json({ data: { request: result.request, replayed: result.replayed } })
+    } catch (cause) {
+      return respondWithError(res, cause)
+    }
+  })
+
   router.get('/approvals', requireSession, async (req, res) => {
     const { value, error } = filterSchema.validate(req.query, { abortEarly: false, convert: true })
     if (error) return res.status(400).json({ error: { code: 'INVALID_FILTER', message: 'The request filters are invalid' } })

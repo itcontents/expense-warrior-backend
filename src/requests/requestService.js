@@ -151,6 +151,13 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
       })
     },
 
+    async cancelOwnRequest(actor, requestId, requestIdForAudit = null) {
+      assertStaffActor(actor)
+      if (!UUID_PATTERN.test(String(requestId || ''))) throw new RequestServiceError('INVALID_REQUEST', 400)
+      if (typeof repository.cancelOwnRequest !== 'function') throw new RequestServiceError('REQUEST_SERVICE_UNAVAILABLE', 503)
+      return repository.cancelOwnRequest({ actor: repositoryActor(actor), requestId, requestIdForAudit })
+    },
+
     async listApprovals(actor, filters = {}) {
       assertStaffActor(actor)
       const normalizedFilters = normalizeFilters(filters)
