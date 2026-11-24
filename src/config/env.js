@@ -26,10 +26,11 @@ const configSchema = Joi.object({
   SMTP_USER: Joi.string().allow('').default(''),
   SMTP_PASS: Joi.string().allow('').default(''),
   EMAIL_FROM: Joi.string().allow('').default(''),
-  PAWAPAY_API_TOKEN: Joi.string().allow('').default(''),
+  PAWAPAY_ENVIRONMENT: Joi.string().valid('SANDBOX', 'PRODUCTION').allow('').default(''),
+  PAWAPAY_SANDBOX_API_TOKEN: Joi.string().allow('').default(''),
+  PAWAPAY_PRODUCTION_API_TOKEN: Joi.string().allow('').default(''),
   ITC_PAWAPAY_PROVIDER_ACCOUNT_ID: Joi.string().guid({ version: ['uuidv4'] }).allow('').default(''),
   ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION: Joi.number().integer().min(1).allow('').default(''),
-  PAWAPAY_BASE_URL: Joi.string().valid('https://api.sandbox.pawapay.io', 'https://api.pawapay.io').default('https://api.sandbox.pawapay.io'),
   PAWAPAY_DEPOSITS_CALLBACK_URL: Joi.string().uri({ scheme: ['https'] }).allow('').default(''),
   PAWAPAY_PAYOUTS_CALLBACK_URL: Joi.string().uri({ scheme: ['https'] }).allow('').default(''),
   PAWAPAY_SIGNATURE_ENABLED: Joi.boolean().truthy('true').falsy('false').default(true),
@@ -37,9 +38,12 @@ const configSchema = Joi.object({
   PAWAPAY_COLLECTIONS_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
   PAWAPAY_PAYOUTS_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
   PAWAPAY_CALLBACK_INBOX_ENABLED: Joi.boolean().truthy('true').falsy('false').default(false),
-  PAWAPAY_SIGNATURE_KEY_ID: Joi.string().allow('').default(''),
-  PAWAPAY_SIGNATURE_PRIVATE_KEY_PATH: Joi.string().allow('').default('./keys/pawapay-signing-private.pem'),
-  PAWAPAY_SIGNATURE_PUBLIC_KEY_PATH: Joi.string().allow('').default('./keys/pawapay-signing-public.pem'),
+  PAWAPAY_SANDBOX_SIGNATURE_KEY_ID: Joi.string().allow('').default(''),
+  PAWAPAY_PRODUCTION_SIGNATURE_KEY_ID: Joi.string().allow('').default(''),
+  PAWAPAY_SANDBOX_SIGNATURE_PRIVATE_KEY_PATH: Joi.string().allow('').default(''),
+  PAWAPAY_PRODUCTION_SIGNATURE_PRIVATE_KEY_PATH: Joi.string().allow('').default(''),
+  PAWAPAY_SANDBOX_SIGNATURE_PUBLIC_KEY_PATH: Joi.string().allow('').default(''),
+  PAWAPAY_PRODUCTION_SIGNATURE_PUBLIC_KEY_PATH: Joi.string().allow('').default(''),
   PAWAPAY_REQUEST_TIMEOUT_MS: Joi.number().integer().min(500).max(30000).default(15000),
   PAWAPAY_FINAL_STATUS_TIMEOUT_MS: Joi.number().integer().min(10000).max(180000).default(60000),
   PAWAPAY_FINAL_STATUS_POLL_INTERVAL_MS: Joi.number().integer().min(1000).max(15000).default(5000),
@@ -88,6 +92,49 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
     throw failure
   }
 
+  const pawaPayEnvironment = value.PAWAPAY_ENVIRONMENT ||
+    (value.NODE_ENV === 'production' ? 'PRODUCTION' : 'SANDBOX')
+  const pawaPayEnvironmentConfig = pawaPayEnvironment === 'PRODUCTION'
+    ? {
+        prefix: 'PAWAPAY_PRODUCTION',
+        baseUrl: 'https://api.pawapay.io',
+        apiToken: value.PAWAPAY_PRODUCTION_API_TOKEN,
+        signatureKeyId: value.PAWAPAY_PRODUCTION_SIGNATURE_KEY_ID,
+        signaturePrivateKeyPath: value.PAWAPAY_PRODUCTION_SIGNATURE_PRIVATE_KEY_PATH,
+        signaturePublicKeyPath: value.PAWAPAY_PRODUCTION_SIGNATURE_PUBLIC_KEY_PATH,
+      }
+    : {
+        prefix: 'PAWAPAY_SANDBOX',
+        baseUrl: 'https://api.sandbox.pawapay.io',
+        apiToken: value.PAWAPAY_SANDBOX_API_TOKEN,
+        signatureKeyId: value.PAWAPAY_SANDBOX_SIGNATURE_KEY_ID,
+        signaturePrivateKeyPath: value.PAWAPAY_SANDBOX_SIGNATURE_PRIVATE_KEY_PATH,
+        signaturePublicKeyPath: value.PAWAPAY_SANDBOX_SIGNATURE_PUBLIC_KEY_PATH,
+      }
+
+  if ((value.ITC_PAWAPAY_PROVIDER_ACCOUNT_ID || value.PAWAPAY_COLLECTIONS_ENABLED || value.PAWAPAY_PAYOUTS_ENABLED) &&
+      !value.PAWAPAY_ENVIRONMENT) {
+    const failure = new Error('PawaPay account configuration requires an explicit provider environment')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['PAWAPAY_ENVIRONMENT']
+    throw failure
+  }
+
+  const legacyPawaPayBaseUrl = String(source.PAWAPAY_BASE_URL || '').trim()
+  if (legacyPawaPayBaseUrl && legacyPawaPayBaseUrl !== pawaPayEnvironmentConfig.baseUrl) {
+    const failure = new Error('Legacy PawaPay base URL conflicts with the selected provider environment')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['PAWAPAY_ENVIRONMENT', 'PAWAPAY_BASE_URL']
+    throw failure
+  }
+
+  if (value.NODE_ENV === 'production' && pawaPayEnvironment !== 'PRODUCTION') {
+    const failure = new Error('Production application deployments must select the PawaPay production environment')
+    failure.code = 'CONFIG_INVALID'
+    failure.details = ['PAWAPAY_ENVIRONMENT']
+    throw failure
+  }
+
   const cloudinaryValues = [value.CLOUDINARY_CLOUD_NAME, value.CLOUDINARY_API_KEY, value.CLOUDINARY_API_SECRET]
   if (cloudinaryValues.some(Boolean) && !cloudinaryValues.every(Boolean)) {
     const failure = new Error('Cloudinary attachment storage credentials must be configured together')
@@ -102,6 +149,20 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
     failure.code = 'CONFIG_INVALID'
     failure.details = ['PAWAPAY_SIGNED_REQUESTS_ONLY_CONFIRMED']
     throw failure
+  }
+
+  if (value.PAWAPAY_COLLECTIONS_ENABLED || value.PAWAPAY_PAYOUTS_ENABLED) {
+    const missing = []
+    if (!pawaPayEnvironmentConfig.apiToken) missing.push(`${pawaPayEnvironmentConfig.prefix}_API_TOKEN`)
+    if (value.PAWAPAY_SIGNATURE_ENABLED !== true) missing.push('PAWAPAY_SIGNATURE_ENABLED')
+    if (!pawaPayEnvironmentConfig.signatureKeyId) missing.push(`${pawaPayEnvironmentConfig.prefix}_SIGNATURE_KEY_ID`)
+    if (!pawaPayEnvironmentConfig.signaturePrivateKeyPath) missing.push(`${pawaPayEnvironmentConfig.prefix}_SIGNATURE_PRIVATE_KEY_PATH`)
+    if (missing.length) {
+      const failure = new Error('Enabled PawaPay financial operations require credentials for the selected provider environment')
+      failure.code = 'CONFIG_INVALID'
+      failure.details = missing
+      throw failure
+    }
   }
 
   if (value.PAWAPAY_COLLECTIONS_ENABLED &&
@@ -138,12 +199,6 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
       const failure = new Error('Production database connections must use TLS')
       failure.code = 'CONFIG_INVALID'
       failure.details = ['DB_SSL_MODE']
-      throw failure
-    }
-    if (value.PAWAPAY_BASE_URL !== 'https://api.pawapay.io') {
-      const failure = new Error('Production PawaPay integration must use the production API URL')
-      failure.code = 'CONFIG_INVALID'
-      failure.details = ['PAWAPAY_BASE_URL']
       throw failure
     }
     if (!value.EXPENSE_WARRIOR_PAYOUT_DESTINATION_KEYS_JSON || !value.EXPENSE_WARRIOR_PAYOUT_DESTINATION_ACTIVE_KEY_ID) {
@@ -190,8 +245,9 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
       serviceClientSecret: value.ITC_SERVICE_CLIENT_SECRET,
     }),
     pawaPay: Object.freeze({
-      baseUrl: value.PAWAPAY_BASE_URL,
-      apiToken: value.PAWAPAY_API_TOKEN,
+      environment: pawaPayEnvironment,
+      baseUrl: pawaPayEnvironmentConfig.baseUrl,
+      apiToken: pawaPayEnvironmentConfig.apiToken,
       providerAccountId: value.ITC_PAWAPAY_PROVIDER_ACCOUNT_ID || null,
       providerAccountVersion: value.ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION ? Number(value.ITC_PAWAPAY_PROVIDER_ACCOUNT_VERSION) : null,
       signatureEnabled: value.PAWAPAY_SIGNATURE_ENABLED,
@@ -199,9 +255,9 @@ function loadConfig(source = process.env, { includeMigrationCredentials = false 
       collectionsEnabled: value.PAWAPAY_COLLECTIONS_ENABLED,
       payoutsEnabled: value.PAWAPAY_PAYOUTS_ENABLED,
       callbackInboxEnabled: value.PAWAPAY_CALLBACK_INBOX_ENABLED,
-      signatureKeyId: value.PAWAPAY_SIGNATURE_KEY_ID,
-      signaturePrivateKeyPath: value.PAWAPAY_SIGNATURE_PRIVATE_KEY_PATH,
-      signaturePublicKeyPath: value.PAWAPAY_SIGNATURE_PUBLIC_KEY_PATH,
+      signatureKeyId: pawaPayEnvironmentConfig.signatureKeyId,
+      signaturePrivateKeyPath: pawaPayEnvironmentConfig.signaturePrivateKeyPath,
+      signaturePublicKeyPath: pawaPayEnvironmentConfig.signaturePublicKeyPath,
       depositsCallbackUrl: value.PAWAPAY_DEPOSITS_CALLBACK_URL,
       payoutsCallbackUrl: value.PAWAPAY_PAYOUTS_CALLBACK_URL,
       requestTimeoutMs: value.PAWAPAY_REQUEST_TIMEOUT_MS,
