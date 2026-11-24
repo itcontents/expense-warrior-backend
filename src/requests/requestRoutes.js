@@ -82,31 +82,16 @@ function createRequestRouter({ identityClient, requestService, pool, attachmentS
 
   router.get('/me', requireSession, async (req, res) => {
     const role = String(req.actor.role || '').toLowerCase()
-    const canRequest = ['staff', 'manager', 'admin'].includes(role)
-    let canViewApprovals = role === 'admin'
-    if (['staff', 'manager'].includes(role)) {
-      try {
-        const result = await pool.query(`
-          SELECT EXISTS (
-            SELECT 1
-              FROM employee_manager_assignments
-             WHERE manager_customer_id = $1
-               AND effective_from <= transaction_timestamp()
-               AND (effective_to IS NULL OR effective_to > transaction_timestamp())
-          ) AS is_manager
-        `, [req.actor.customerId])
-        canViewApprovals = result.rows[0]?.is_manager === true
-      } catch (_error) {
-        return res.status(503).json({ error: { code: 'CAPABILITIES_UNAVAILABLE', message: 'Your workspace permissions are temporarily unavailable' } })
-      }
-    }
+    const isMasterAdmin = req.actor.isMasterAdmin === true
+    const canFinalApprove = role === 'admin' && staffPayoutsEnabled === true &&
+      (isMasterAdmin || req.actor.canFinalApprove === true)
     return res.status(200).json({ data: {
       role,
-      can_request: canRequest,
-      can_view_approvals: canViewApprovals,
-      can_final_approve: role === 'admin' && staffPayoutsEnabled === true,
-      can_bulk_approve: role === 'admin' && staffPayoutsEnabled === true,
-      is_master_admin: req.actor.isMasterAdmin === true,
+      can_request: isMasterAdmin || req.actor.canRequest === true,
+      can_view_approvals: isMasterAdmin || req.actor.canViewApprovals === true,
+      can_final_approve: canFinalApprove,
+      can_bulk_approve: canFinalApprove && (isMasterAdmin || req.actor.canBulkApprove === true),
+      is_master_admin: isMasterAdmin,
     } })
   })
 
@@ -184,6 +169,9 @@ function createRequestRouter({ identityClient, requestService, pool, attachmentS
   })
 
   router.get('/approvals', requireSession, async (req, res) => {
+    if (req.actor.isMasterAdmin !== true && req.actor.canViewApprovals !== true) {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Approval queue access is not enabled for this account' } })
+    }
     const { value, error } = filterSchema.validate(req.query, { abortEarly: false, convert: true })
     if (error) return res.status(400).json({ error: { code: 'INVALID_FILTER', message: 'The request filters are invalid' } })
 

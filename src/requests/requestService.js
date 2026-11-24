@@ -17,7 +17,18 @@ function actorRole(actor) {
 }
 
 function repositoryActor(actor) {
-  return { customerId: actor.customerId, role: actorRole(actor), isMasterAdmin: actor.isMasterAdmin === true }
+  return {
+    customerId: actor.customerId,
+    role: actorRole(actor),
+    isMasterAdmin: actor.isMasterAdmin === true,
+    canViewApprovals: actor.isMasterAdmin === true || actor.canViewApprovals === true,
+  }
+}
+
+function assertCapability(actor, capability) {
+  if (actor?.isMasterAdmin !== true && actor?.[capability] !== true) {
+    throw new RequestServiceError('FORBIDDEN', 403)
+  }
 }
 
 function assertStaffActor(actor) {
@@ -91,6 +102,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
   return Object.freeze({
     async submitRequest(actor, input, idempotencyKey, { file, requestId } = {}) {
       assertStaffActor(actor)
+      assertCapability(actor, 'canRequest')
       const request = validateSubmission(input, idempotencyKey)
       if (request.payoutDestinationInput) {
         if (!phoneVault || typeof phoneVault.encrypt !== 'function' || typeof phoneVault.fingerprint !== 'function' ||
@@ -160,6 +172,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
 
     async listApprovals(actor, filters = {}) {
       assertStaffActor(actor)
+      assertCapability(actor, 'canViewApprovals')
       const normalizedFilters = normalizeFilters(filters)
       return repository.listApprovals({
         actor: repositoryActor(actor),
@@ -169,6 +182,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
 
     async approveManager(actor, requestId, requestIdForAudit = null) {
       assertStaffActor(actor)
+      assertCapability(actor, 'canViewApprovals')
       if (!UUID_PATTERN.test(String(requestId || ''))) throw new RequestServiceError('INVALID_REQUEST', 400)
       if (actorRole(actor) !== 'staff') throw new RequestServiceError('FORBIDDEN', 403)
       if (typeof repository.prepareManagerApproval !== 'function' ||
@@ -264,6 +278,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
 
     async getPayoutDestination(actor, requestId, requestIdForAudit = null) {
       assertStaffActor(actor)
+      assertCapability(actor, 'canViewApprovals')
       if (String(actor.role || '').toLowerCase() !== 'admin') throw new RequestServiceError('FORBIDDEN', 403)
       if (!UUID_PATTERN.test(String(requestId || ''))) throw new RequestServiceError('INVALID_REQUEST', 400)
       if (!phoneVault || typeof phoneVault.decrypt !== 'function' || typeof repository.revealPayoutDestination !== 'function') {
@@ -284,6 +299,7 @@ function createRequestService({ repository, attachmentStorage, financeClient, ph
 
     async rejectRequest(actor, requestId, stage, reason, requestIdForAudit = null) {
       assertStaffActor(actor)
+      assertCapability(actor, 'canViewApprovals')
       if (!UUID_PATTERN.test(String(requestId || '')) || !['manager', 'admin'].includes(stage)) {
         throw new RequestServiceError('INVALID_REQUEST', 400)
       }

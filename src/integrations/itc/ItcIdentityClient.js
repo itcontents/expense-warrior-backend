@@ -81,17 +81,27 @@ class ItcIdentityClient {
       }
 
       const customer = payload?.data?.customer
+      const permissionKeys = ['can_request', 'can_view_approvals', 'can_final_approve', 'can_bulk_approve']
       if (payload?.success !== true ||
           !CUSTOMER_ID_PATTERN.test(String(customer?.customer_id || '')) ||
           !['admin', 'staff', 'vendor', 'customer'].includes(String(customer?.role || '').toLowerCase()) ||
-          !['admin', 'staff'].includes(String(customer?.expense_warrior_role || '').toLowerCase())) {
+          !['admin', 'staff'].includes(String(customer?.expense_warrior_role || '').toLowerCase()) ||
+          typeof customer?.is_master_admin !== 'boolean' ||
+          permissionKeys.some((key) => typeof customer?.[key] !== 'boolean')) {
         throw new ItcIdentityError('ITC_IDENTITY_RESPONSE_INVALID', 502)
       }
 
+      const isMasterAdmin = String(customer.expense_warrior_role).toLowerCase() === 'admin' && customer.is_master_admin === true
       return {
         customerId: customer.customer_id,
         role: String(customer.expense_warrior_role).toLowerCase(),
-        isMasterAdmin: String(customer.expense_warrior_role).toLowerCase() === 'admin' && customer.is_master_admin === true,
+        isMasterAdmin,
+        canRequest: isMasterAdmin || customer.can_request,
+        canViewApprovals: isMasterAdmin || customer.can_view_approvals,
+        canFinalApprove: String(customer.expense_warrior_role).toLowerCase() === 'admin' &&
+          (isMasterAdmin || customer.can_final_approve),
+        canBulkApprove: String(customer.expense_warrior_role).toLowerCase() === 'admin' &&
+          (isMasterAdmin || customer.can_bulk_approve),
         active: true,
       }
     } catch (error) {

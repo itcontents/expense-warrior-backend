@@ -251,10 +251,10 @@ async function listForActor({ pool, actor, filters }) {
          LIMIT 1
       ) payout ON true
      WHERE r.requester_customer_id = $2
-        OR ($1::text = 'staff' AND r.reviewer_manager_customer_id = $2)
+        OR ($1::text = 'staff' AND $5::boolean AND r.reviewer_manager_customer_id = $2)
      ORDER BY ${column} ${filters.direction.toUpperCase()}, r.request_id DESC
      LIMIT $3 OFFSET $4
-  `, [actor.role, actor.customerId, filters.limit + 1, filters.offset])
+  `, [actor.role, actor.customerId, filters.limit + 1, filters.offset, actor.canViewApprovals === true])
 
   const hasMore = result.rows.length > filters.limit
   const rows = hasMore ? result.rows.slice(0, filters.limit) : result.rows
@@ -337,12 +337,12 @@ async function listApprovals({ pool, actor, filters }) {
       LEFT JOIN expense_categories subcategory ON subcategory.category_id = r.subcategory_id
      WHERE (r.requester_customer_id <> $2 OR ($5::boolean AND $1::text = 'admin'))
        AND (
-         ($1::text = 'admin' AND r.status IN ('PENDING_ADMIN', 'MANAGER_APPROVED'))
-         OR ($1::text = 'staff' AND r.reviewer_manager_customer_id = $2 AND r.status IN ('PENDING_MANAGER', 'MANAGER_APPROVAL_PENDING_HOLD'))
+         ($6::boolean AND $1::text = 'admin' AND r.status IN ('PENDING_ADMIN', 'MANAGER_APPROVED'))
+         OR ($6::boolean AND $1::text = 'staff' AND r.status IN ('PENDING_MANAGER', 'MANAGER_APPROVAL_PENDING_HOLD', 'PENDING_ADMIN', 'MANAGER_APPROVED'))
        )
      ORDER BY ${column} ${filters.direction.toUpperCase()}, r.request_id DESC
      LIMIT $3 OFFSET $4
-  `, [actor.role, actor.customerId, filters.limit + 1, filters.offset, canMasterAdminSelfReview(actor)])
+  `, [actor.role, actor.customerId, filters.limit + 1, filters.offset, canMasterAdminSelfReview(actor), actor.canViewApprovals === true])
   const hasMore = result.rows.length > filters.limit
   return {
     items: hasMore ? result.rows.slice(0, filters.limit) : result.rows,
@@ -360,12 +360,12 @@ async function findAttachment({ pool, actor, requestId, attachmentId }) {
      WHERE a.attachment_id = $1
        AND r.request_id = $2
        AND (
-         $3::text = 'admin'
-         OR r.requester_customer_id = $4
-         OR ($3::text = 'staff' AND r.reviewer_manager_customer_id = $4)
+         r.requester_customer_id = $4
+         OR ($5::boolean AND $3::text = 'admin')
+         OR ($5::boolean AND $3::text = 'staff' AND r.reviewer_manager_customer_id = $4)
        )
      LIMIT 1
-  `, [attachmentId, requestId, actor.role, actor.customerId])
+  `, [attachmentId, requestId, actor.role, actor.customerId, actor.canViewApprovals === true])
   return result.rows[0] || null
 }
 

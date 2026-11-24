@@ -30,6 +30,18 @@ function respondWithError(res, error, { logger = console, requestId = '', operat
   } })
 }
 
+function requirePayoutPermission(capability) {
+  return (req, res, next) => {
+    const isAdmin = String(req.actor?.role || '').toLowerCase() === 'admin'
+    const allowed = req.actor?.isMasterAdmin === true ||
+      (req.actor?.canFinalApprove === true && req.actor?.[capability] === true)
+    if (!isAdmin || !allowed) {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Payout permission is not enabled for this account' } })
+    }
+    return next()
+  }
+}
+
 function createStaffPayoutRouter({ identityClient, payoutService, logger = console } = {}) {
   if (!identityClient || !payoutService || typeof payoutService.finalApprove !== 'function' ||
       typeof payoutService.retry !== 'function' || typeof payoutService.reconcile !== 'function' || typeof payoutService.bulkFinalApprove !== 'function' ||
@@ -39,7 +51,7 @@ function createStaffPayoutRouter({ identityClient, payoutService, logger = conso
   const router = express.Router()
   const requireSession = createRequireItcSession(identityClient)
 
-  router.get('/payouts/recovery', requireSession, async (req, res) => {
+  router.get('/payouts/recovery', requireSession, requirePayoutPermission('canFinalApprove'), async (req, res) => {
     const { value, error } = recoveryQuerySchema.validate(req.query, { abortEarly: false, convert: true })
     if (error) return res.status(400).json({ error: { code: 'INVALID_FILTER', message: 'The payout recovery filters are invalid' } })
     try {
@@ -48,7 +60,7 @@ function createStaffPayoutRouter({ identityClient, payoutService, logger = conso
     } catch (cause) { return respondWithError(res, cause, { logger, requestId: req.requestId, operation: 'list-recovery' }) }
   })
 
-  router.post('/requests/:request_id/final-approve', requireSession, async (req, res) => {
+  router.post('/requests/:request_id/final-approve', requireSession, requirePayoutPermission('canFinalApprove'), async (req, res) => {
     try {
       const result = await payoutService.finalApprove(req.actor, req.params.request_id, req.requestId)
       return res.status(result.pending ? 202 : 200).json({ data: {
@@ -59,7 +71,7 @@ function createStaffPayoutRouter({ identityClient, payoutService, logger = conso
     } catch (error) { return respondWithError(res, error, { logger, requestId: req.requestId, operation: 'final-approve' }) }
   })
 
-  router.post('/requests/:request_id/payout/retry', requireSession, async (req, res) => {
+  router.post('/requests/:request_id/payout/retry', requireSession, requirePayoutPermission('canFinalApprove'), async (req, res) => {
     const validId = Joi.string().guid({ version: ['uuidv4'] }).required().validate(req.params.request_id)
     const validBody = Joi.object({}).unknown(false).validate(req.body === undefined ? {} : req.body, { convert: false })
     if (validId.error || validBody.error || Object.keys(req.query).length) {
@@ -74,7 +86,7 @@ function createStaffPayoutRouter({ identityClient, payoutService, logger = conso
     } catch (error) { return respondWithError(res, error, { logger, requestId: req.requestId, operation: 'retry-payout' }) }
   })
 
-  router.post('/requests/:request_id/payout/reconcile', requireSession, async (req, res) => {
+  router.post('/requests/:request_id/payout/reconcile', requireSession, requirePayoutPermission('canFinalApprove'), async (req, res) => {
     try {
       const result = await payoutService.reconcile(req.actor, req.params.request_id, req.requestId)
       return res.status(result.pending ? 202 : 200).json({ data: {
@@ -85,7 +97,7 @@ function createStaffPayoutRouter({ identityClient, payoutService, logger = conso
     } catch (error) { return respondWithError(res, error, { logger, requestId: req.requestId, operation: 'reconcile-payout' }) }
   })
 
-  router.post('/requests/bulk-final-approve', requireSession, async (req, res) => {
+  router.post('/requests/bulk-final-approve', requireSession, requirePayoutPermission('canBulkApprove'), async (req, res) => {
     const { value, error } = bulkSchema.validate(req.body, { abortEarly: false, convert: false })
     if (error) return res.status(400).json({ error: { code: 'INVALID_BULK_REQUEST', message: 'Select between 1 and 50 unique requests' } })
     try {
